@@ -1,7 +1,7 @@
 # Mimir: Binary Ninja Plugin + AI Studio Companion
 
 <p align="center">
-  <img src="assets/mimir-mascot.png" alt="Mimir geometric cyber-guardian mascot" width="420">
+  <img src="assets/mimir-emblem.png" alt="Mimir geometric cyber-guardian mascot" width="420">
 </p>
 
 Mimir’s visual mark is a weathered guardian emblem with a faceted analysis eye, circuit-like geometry, and a retro signal-print palette.
