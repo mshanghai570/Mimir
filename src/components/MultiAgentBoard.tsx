@@ -148,7 +148,58 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
   const handleDispatchAll = async () => {
     setIsDispatchingAll(true);
     try {
-      await Promise.all(roles.map((role) => runAgent(role)));
+      const res = await api.createAgentJob({
+        objective,
+        context: {
+          binaryName: selectedBinary.filename,
+          arch: selectedBinary.arch,
+          functionName: selectedFunction.demangledName || selectedFunction.name,
+          address: selectedFunction.address,
+          hlil: selectedFunction.hlil,
+          assembly: selectedFunction.instructions
+            .map((i) => `${i.address}: ${i.rawBytes.padEnd(12)} ${i.mnemonic} ${i.operands}`)
+            .join('\n'),
+        },
+        agents: roles.map((role) => {
+          const provider = providers.find((p) => p.id === role.assignedProviderId) || providers[0];
+          return {
+            id: role.id,
+            role: role.id,
+            providerId: provider?.id,
+            model: role.assignedModel,
+            customPrompt: role.customPrompt,
+            globalPrompt,
+            temperature: role.temperature,
+            skills: resolveActiveSkillsText(role, skills),
+          };
+        }),
+      });
+      if (!res.success || !res.job?.id) throw new Error(res.error || 'Could not start multi-agent job.');
+
+      let status = res.job;
+      while (status.status === 'running') {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        const poll = await api.getAgentJob(res.job.id);
+        if (!poll.success || !poll.job) throw new Error(poll.error || 'Could not read multi-agent job status.');
+        status = poll.job;
+        for (const event of status.events || []) {
+          const role = roles.find((item) => item.id === event.role);
+          if (role) {
+            onUpdateRole({ ...role, status: event.status === 'completed' ? 'completed' : event.status === 'error' ? 'error' : event.status === 'running' ? 'running' : role.status });
+            if (event.status === 'completed' || event.status === 'error') {
+              setOutputs((prev) => ({
+                ...prev,
+                [role.id]: {
+                  output: event.text || event.error || '',
+                  modelUsed: event.modelUsed || role.assignedModel,
+                  timestamp: new Date().toLocaleTimeString(),
+                  isError: event.status === 'error',
+                },
+              }));
+            }
+          }
+        }
+      }
     } finally {
       setIsDispatchingAll(false);
     }

@@ -119,6 +119,41 @@ export const api = {
   /**
    * Fetch skill from URL (GitHub / raw) or parse markdown
    */
+  async createAgentJob(params: {
+    objective: string;
+    context: Record<string, unknown>;
+    agents: Array<Record<string, unknown>>;
+  }): Promise<{ success: boolean; job?: any; error?: string }> {
+    try {
+      const res = await fetch('/api/ai/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Agent job failed to start' };
+    }
+  },
+
+  async getAgentJob(id: string): Promise<{ success: boolean; job?: any; error?: string }> {
+    try {
+      const res = await fetch(`/api/ai/jobs/${encodeURIComponent(id)}`);
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Agent job status failed' };
+    }
+  },
+
+  async cancelAgentJob(id: string): Promise<{ success: boolean; job?: any; error?: string }> {
+    try {
+      const res = await fetch(`/api/ai/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Agent job cancellation failed' };
+    }
+  },
+
   async fetchSkill(source: string): Promise<{ success: boolean; skill?: any; error?: string }> {
     try {
       const res = await fetch('/api/skills/fetch', {

@@ -382,6 +382,110 @@ app.post('/api/ai/chat', async (req, res) => {
   }
 });
 
+type AgentJobEvent = {
+  agentId: string;
+  role: string;
+  status: 'queued' | 'running' | 'completed' | 'error';
+  modelUsed?: string;
+  text?: string;
+  error?: string;
+};
+
+type AgentJob = {
+  id: string;
+  status: 'running' | 'completed' | 'cancelled';
+  objective: string;
+  events: AgentJobEvent[];
+  createdAt: string;
+};
+
+const agentJobs = new Map<string, AgentJob>();
+
+app.post('/api/ai/jobs', (req, res) => {
+  const { objective, context, agents } = req.body || {};
+  if (!objective || !Array.isArray(agents) || agents.length === 0) {
+    return res.status(400).json({ success: false, error: 'Objective and at least one agent are required.' });
+  }
+  if (agents.length > 12) return res.status(400).json({ success: false, error: 'A job can contain at most 12 agents.' });
+
+  const job: AgentJob = {
+    id: `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    status: 'running',
+    objective: String(objective),
+    events: agents.map((agent: any, index: number) => ({
+      agentId: String(agent.id || `${agent.role || 'agent'}_${index}`),
+      role: String(agent.role || 'decompiler'),
+      status: 'queued',
+    })),
+    createdAt: new Date().toISOString(),
+  };
+  agentJobs.set(job.id, job);
+
+  void (async () => {
+    let next = 0;
+    const worker = async () => {
+      while (next < agents.length && job.status === 'running') {
+        const index = next++;
+        const agent = agents[index];
+        const event = job.events[index];
+        event.status = 'running';
+        try {
+          const response = await fetch(`http://127.0.0.1:${PORT}/api/ai/dispatch-role`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(ACCESS_TOKEN ? { Authorization: `Bearer ${ACCESS_TOKEN}` } : {}) },
+            body: JSON.stringify({
+              role: agent.role,
+              agentConfig: {
+                providerId: agent.providerId,
+                model: agent.model,
+                customPrompt: agent.customPrompt,
+                globalPrompt: agent.globalPrompt,
+                temperature: agent.temperature,
+                skills: agent.skills,
+              },
+              objective,
+              context,
+            }),
+          });
+          const result = await response.json() as { success?: boolean; output?: string; modelUsed?: string; error?: string };
+          if (!response.ok || !result.success) {
+            event.status = 'error';
+            event.error = result.error || `Agent returned HTTP ${response.status}`;
+          } else {
+            event.status = 'completed';
+            event.text = result.output || '';
+            event.modelUsed = result.modelUsed;
+          }
+        } catch (error: any) {
+          event.status = 'error';
+          event.error = error.message || 'Agent dispatch failed.';
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, agents.length) }, () => worker()));
+    if (job.status === 'running') job.status = 'completed';
+  })();
+
+  return res.status(202).json({ success: true, job });
+});
+
+app.get('/api/ai/jobs/:id', (req, res) => {
+  const job = agentJobs.get(String(req.params.id));
+  if (!job) return res.status(404).json({ success: false, error: 'Agent job not found.' });
+  return res.json({ success: true, job });
+});
+
+app.post('/api/ai/jobs/:id/cancel', (req, res) => {
+  const job = agentJobs.get(String(req.params.id));
+  if (!job) return res.status(404).json({ success: false, error: 'Agent job not found.' });
+  job.status = 'cancelled';
+  job.events.filter((event) => event.status === 'queued').forEach((event) => {
+    event.status = 'error';
+    event.error = 'Job cancelled.';
+  });
+  return res.json({ success: true, job });
+});
+
 // ==========================================
 // 3. Multi-Agent Task Dispatcher
 // ==========================================
