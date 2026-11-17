@@ -8,6 +8,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -145,6 +146,19 @@ class MimirAgent:
                    if os.environ.get("MIMIR_ACCESS_TOKEN", "").strip() else {}),
             },
             method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def get_json(self, route, timeout=45):
+        endpoint = f"{get_server_endpoint()}{route}"
+        req = urllib.request.Request(
+            endpoint,
+            headers={
+                **({"Authorization": f"Bearer {os.environ['MIMIR_ACCESS_TOKEN'].strip()}"}
+                   if os.environ.get("MIMIR_ACCESS_TOKEN", "").strip() else {}),
+            },
+            method="GET",
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -542,6 +556,160 @@ def register_mimir():
                 settings.set_string(SETTINGS_KEY, self.endpoint.text().strip().rstrip("/"))
                 self.accept()
 
+        class MimirMultiAgentDialog(QDialog):
+            def __init__(self, bv, current_func=None, parent=None):
+                super().__init__(parent)
+                self.bv = bv
+                self.current_func = current_func
+                self.agent = MimirAgent(bv) if bv else None
+                self.setWindowTitle("Mimir Multi-Agent Team")
+                self.resize(620, 620)
+                layout = QVBoxLayout(self)
+                layout.addWidget(QLabel("Dispatch several models/providers against the same Binary Ninja context.", self))
+
+                self.objective = QTextEdit(self)
+                self.objective.setPlainText("Analyze the current function, explain its security checks, and propose safe next steps.")
+                self.objective.setMaximumHeight(90)
+                layout.addWidget(self.objective)
+
+                form = QFormLayout()
+                self.agent_rows = []
+                for title, role in (("Decompiler", "decompiler"), ("Security Auditor", "auditor"), ("Frida Specialist", "frida_tracer")):
+                    model = QLineEdit(get_ai_config().get("model", ""), self)
+                    model.setPlaceholderText("Model ID; each row may use a different model")
+                    form.addRow(f"{title} model", model)
+                    self.agent_rows.append((role, model))
+                layout.addLayout(form)
+
+                self.output = QTextEdit(self)
+                self.output.setReadOnly(True)
+                layout.addWidget(self.output)
+                run = QPushButton("Dispatch Team", self)
+                run.clicked.connect(self.dispatch)
+                layout.addWidget(run)
+
+            def dispatch(self):
+                if not self.agent or not self.bv:
+                    self.output.append("No active BinaryView open in Binary Ninja.")
+                    return
+                func = self.current_func or (self.bv.functions[0] if len(self.bv.functions) > 0 else None)
+                config = get_ai_config()
+                context = {
+                    "binaryName": self.bv.file.filename,
+                    "arch": self.bv.arch.name if self.bv.arch else "arm64",
+                    "functionName": func.name if func else "unknown",
+                    "address": hex(func.start) if func else "0x0",
+                    "hlil": safe_extract_hlil(func) if func else "",
+                    "assembly": safe_extract_disasm(self.bv, func) if func else "",
+                }
+                agents = []
+                for role, model in self.agent_rows:
+                    agents.append({
+                        "id": role,
+                        "role": role,
+                        "providerType": config.get("providerType"),
+                        "providerUrl": config.get("providerUrl"),
+                        "apiKey": config.get("apiKey"),
+                        "model": model.text().strip() or config.get("model"),
+                    })
+                payload = {"objective": self.objective.toPlainText().strip(), "context": context, "agents": agents}
+                self.output.append("<b>Team:</b> queued server-owned job...")
+
+                def worker():
+                    try:
+                        result = self.agent.post_json("/ai/jobs", payload)
+                        job = result.get("job") or {}
+                        job_id = job.get("id")
+                        if not job_id:
+                            raise RuntimeError(result.get("error", "Job was not created"))
+                        seen = set()
+                        for _ in range(150):
+                            time.sleep(0.4)
+                            status = self.agent.get_json(f"/ai/jobs/{job_id}").get("job", {})
+                            for event in status.get("events", []):
+                                key = (event.get("agentId"), event.get("status"), event.get("text"), event.get("error"))
+                                if key in seen or event.get("status") not in ("completed", "error"):
+                                    continue
+                                seen.add(key)
+                                label = event.get("role", "agent")
+                                text = event.get("text") or event.get("error") or "No output"
+                                execute_on_main_thread(lambda label=label, text=text: self.output.append(f"<b>{label}:</b><br/>{text}"))
+                            if status.get("status") != "running":
+                                break
+                    except Exception as exc:
+                        message = str(exc)
+                        execute_on_main_thread(lambda message=message: self.output.append(f"<b>Multi-agent error:</b> {message}"))
+
+                threading.Thread(target=worker, daemon=True).start()
+
+        class MimirFridaDialog(QDialog):
+            def __init__(self, bv, current_func=None, parent=None):
+                super().__init__(parent)
+                self.bv = bv
+                self.current_func = current_func
+                self.agent = MimirAgent(bv) if bv else None
+                self.setWindowTitle("Mimir Frida Bridge")
+                self.resize(620, 600)
+                layout = QVBoxLayout(self)
+                layout.addWidget(QLabel("Real mode requires MIMIR_FRIDA_MODE=real and Frida installed on the Mac host. Otherwise the server reports simulation mode.", self))
+                self.device_id = QLineEdit(self)
+                self.device_id.setPlaceholderText("Device ID from List Devices")
+                layout.addWidget(self.device_id)
+                self.pid = QLineEdit(self)
+                self.pid.setPlaceholderText("Process PID")
+                layout.addWidget(self.pid)
+                self.script = QTextEdit(self)
+                self.script.setPlainText("console.log('Mimir Frida script loaded');")
+                layout.addWidget(self.script)
+                self.output = QTextEdit(self)
+                self.output.setReadOnly(True)
+                layout.addWidget(self.output)
+                buttons = QHBoxLayout()
+                for label, callback in (("List Devices", self.list_devices), ("List Processes", self.list_processes), ("Run Script", self.run_script)):
+                    button = QPushButton(label, self)
+                    button.clicked.connect(callback)
+                    buttons.addWidget(button)
+                layout.addLayout(buttons)
+
+            def show_result(self, result):
+                mode = result.get("mode", "unknown")
+                self.output.append(f"<b>Mode:</b> {mode}<br/>{json.dumps(result, indent=2)}")
+
+            def list_devices(self):
+                def worker():
+                    try:
+                        result = self.agent.get_json("/frida/devices")
+                        execute_on_main_thread(lambda: self.show_result(result))
+                    except Exception as exc:
+                        message = str(exc)
+                        execute_on_main_thread(lambda message=message: self.output.append(f"Frida error: {message}"))
+                threading.Thread(target=worker, daemon=True).start()
+
+            def list_processes(self):
+                def worker():
+                    try:
+                        result = self.agent.post_json("/frida/processes", {"deviceId": self.device_id.text().strip()})
+                        execute_on_main_thread(lambda: self.show_result(result))
+                    except Exception as exc:
+                        message = str(exc)
+                        execute_on_main_thread(lambda message=message: self.output.append(f"Frida error: {message}"))
+                threading.Thread(target=worker, daemon=True).start()
+
+            def run_script(self):
+                def worker():
+                    try:
+                        result = self.agent.post_json("/frida/run-script", {
+                            "deviceId": self.device_id.text().strip(),
+                            "pid": int(self.pid.text().strip()),
+                            "script": self.script.toPlainText(),
+                            "scriptType": "custom",
+                        })
+                        execute_on_main_thread(lambda: self.show_result(result))
+                    except Exception as exc:
+                        message = str(exc)
+                        execute_on_main_thread(lambda message=message: self.output.append(f"Frida error: {message}"))
+                threading.Thread(target=worker, daemon=True).start()
+
         class MimirSidebarWidget(SidebarWidget):
             def __init__(self, name, frame, data):
                 super().__init__(name)
@@ -549,6 +717,8 @@ def register_mimir():
                 self.bv = data
                 self.dialog = None
                 self.settings_dialog = None
+                self.multi_agent_dialog = None
+                self.frida_dialog = None
                 layout = QVBoxLayout(self)
                 self.info_label = QLabel("Mimir AI Assistant", self)
                 layout.addWidget(self.info_label)
@@ -568,6 +738,16 @@ def register_mimir():
                 btn_settings = QPushButton("AI Provider Settings", self)
                 btn_settings.clicked.connect(self.show_settings)
                 layout.addWidget(btn_settings)
+
+                btn_agents = QPushButton("Multi-Agent Team", self)
+                btn_agents.setToolTip("Dispatch multiple models/providers through the Mimir backend")
+                btn_agents.clicked.connect(self.show_multi_agents)
+                layout.addWidget(btn_agents)
+
+                btn_frida = QPushButton("Frida Bridge", self)
+                btn_frida.setToolTip("List devices, inspect processes, and run Frida scripts")
+                btn_frida.clicked.connect(self.show_frida)
+                layout.addWidget(btn_frida)
                 layout.addStretch(1)
 
             def notifyViewChanged(self, view_frame):
@@ -615,6 +795,26 @@ def register_mimir():
                 self.settings_dialog.show()
                 self.settings_dialog.raise_()
                 self.settings_dialog.activateWindow()
+
+            def show_multi_agents(self):
+                if self.multi_agent_dialog is None:
+                    self.multi_agent_dialog = MimirMultiAgentDialog(self.bv, self._get_current_func(), self)
+                else:
+                    self.multi_agent_dialog.bv = self.bv
+                    self.multi_agent_dialog.current_func = self._get_current_func()
+                self.multi_agent_dialog.show()
+                self.multi_agent_dialog.raise_()
+                self.multi_agent_dialog.activateWindow()
+
+            def show_frida(self):
+                if self.frida_dialog is None:
+                    self.frida_dialog = MimirFridaDialog(self.bv, self._get_current_func(), self)
+                else:
+                    self.frida_dialog.bv = self.bv
+                    self.frida_dialog.current_func = self._get_current_func()
+                self.frida_dialog.show()
+                self.frida_dialog.raise_()
+                self.frida_dialog.activateWindow()
 
         def make_sidebar_icon():
             icon = QImage()

@@ -459,6 +459,9 @@ app.post('/api/ai/jobs', (req, res) => {
               role: agent.role,
               agentConfig: {
                 providerId: agent.providerId,
+                providerType: agent.providerType,
+                providerUrl: agent.providerUrl,
+                apiKey: agent.apiKey,
                 model: agent.model,
                 customPrompt: agent.customPrompt,
                 globalPrompt: agent.globalPrompt,

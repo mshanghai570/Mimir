@@ -12,4 +12,6 @@ The plugin uses the live Binary Ninja `BinaryView`. AI analysis calls the option
 
 Open the **AI Provider Settings** button in the Mimir sidebar to configure the provider type, provider URL, model, API key, and Mimir backend endpoint. The plugin saves these values in Binary Ninja settings and uses them for later AI requests.
 
+The same sidebar also includes **Multi-Agent Team** and **Frida Bridge**. Multi-Agent Team dispatches Decompiler, Security Auditor, and Frida Specialist roles through the companion server, with a separate model field for each role. Frida Bridge lists devices, lists processes, and runs scripts through the real host bridge when `MIMIR_FRIDA_MODE=real`; otherwise its responses are explicitly marked as simulation.
+
 Do not copy only one file: `plugin.json`, `__init__.py`, and `mimir_binja.py` must remain together in the `mimir_plugin` folder.
