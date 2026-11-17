@@ -1,5 +1,11 @@
 # Mimir: Binary Ninja Plugin + AI Studio Companion
 
+<p align="center">
+  <img src="assets/mimir-mascot.png" alt="Mimir geometric cyber-guardian mascot" width="420">
+</p>
+
+Mimir’s visual mark is an original cyber-guardian: a geometric owl-wolf silhouette, a faceted analysis eye, circuit traces, and a weathered signal-print palette. It is meant to feel like a field emblem for reverse engineering rather than a generic AI logo.
+
 This repository contains two related pieces:
 
 1. `plugin/mimir_plugin/` is the directly installable Binary Ninja plugin. It registers Binary Ninja commands, reads the active `BinaryView`, extracts HLIL/LLIL and disassembly, adds analysis comments, and performs undoable ARM64 patch operations.
