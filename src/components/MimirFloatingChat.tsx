@@ -128,6 +128,23 @@ export const MimirFloatingChat: React.FC<MimirFloatingChatProps> = ({
         onSelectInstruction,
         onApplyPatch,
         onNavigateToFrida,
+        chatHistory: messages
+          .filter((message) => message.sender === 'user' || message.sender === 'agent')
+          .map((message) => ({
+            role: message.sender === 'user' ? 'user' : 'assistant',
+            content: message.text,
+          })),
+        onProgress: (text) => {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `progress_${Date.now()}_${Math.random()}`,
+              sender: 'system',
+              text,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+          ]);
+        },
       });
 
       const suggestedActions: ChatMessage['suggestedActions'] = [];
@@ -281,15 +298,17 @@ export const MimirFloatingChat: React.FC<MimirFloatingChatProps> = ({
           >
             <div className="flex items-center gap-2 px-1 text-[10px] text-slate-500 font-mono">
               <span className={`font-semibold ${msg.isError ? 'text-rose-400' : 'text-slate-400'}`}>
-                {msg.sender === 'user' ? 'You' : msg.roleTitle || 'Mimir Agent'}
+                {msg.sender === 'user' ? 'You' : msg.sender === 'system' ? 'Mimir Activity' : msg.roleTitle || 'Mimir Agent'}
               </span>
               <span>{msg.timestamp}</span>
             </div>
 
-            <div
+          <div
               className={`p-3.5 rounded-2xl max-w-[92%] leading-relaxed ${
                 msg.sender === 'user'
                   ? 'bg-cyan-500/15 border border-cyan-500/40 text-cyan-50 rounded-br-sm'
+                  : msg.sender === 'system'
+                  ? 'bg-amber-950/20 border border-amber-700/40 text-amber-200 rounded-bl-sm font-mono text-[11px]'
                   : msg.isError
                   ? 'bg-rose-950/30 border border-rose-800/60 text-rose-200 rounded-bl-sm'
                   : 'bg-[#0e131f] border border-slate-800 text-slate-200 rounded-bl-sm shadow-md'

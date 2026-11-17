@@ -24,6 +24,8 @@ export interface IntentExecutionContext {
   onSetSearchFilter?: (term: string) => void;
   onApplyPatch?: (patch: PatchRecord) => void;
   onNavigateToFrida: (hookTarget?: string) => void;
+  chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  onProgress?: (text: string) => void;
 }
 
 export interface IntentExecutionResult {
@@ -69,6 +71,7 @@ export async function executeNaturalLanguageIntent(
 ): Promise<IntentExecutionResult> {
   const query = rawQuery.trim();
   const lower = query.toLowerCase();
+  const progress = ctx.onProgress || (() => undefined);
 
   // 1. Semantic Function Search & Discovery across current binary (or all binaries if needed)
   const isSearch =
@@ -93,6 +96,7 @@ export async function executeNaturalLanguageIntent(
       lower.includes('auth') ||
       lower.includes('biometric'))
   ) {
+    progress('Searching loaded binary functions and strings.');
     const keyword = resolveSearchKeyword(lower);
 
     const matchInBinary = (bin: BinarySample) =>
@@ -161,6 +165,7 @@ export async function executeNaturalLanguageIntent(
         lower.includes('invert')));
 
   if (isPatch) {
+    progress('Preparing a deterministic patch plan for the selected function.');
     let targetFunc = ctx.selectedFunction;
     for (const f of ctx.selectedBinary.functions) {
       const demangledRoot = f.demangledName?.toLowerCase().split('(')[0] || '';
@@ -210,6 +215,7 @@ export async function executeNaturalLanguageIntent(
 
   // 3. Dynamic Frida Instrumentation
   if (lower.startsWith('/trace') || lower.includes('frida') || lower.includes('hook') || lower.includes('trace')) {
+    progress('Preparing a Frida hook preview and opening the Frida workspace.');
     const funcName = ctx.selectedFunction.demangledName || ctx.selectedFunction.name;
     ctx.onNavigateToFrida(funcName);
 
@@ -238,6 +244,50 @@ export async function executeNaturalLanguageIntent(
   const roleConfig = ctx.roles.find((r) => r.id === targetRole) || ctx.roles[0];
   const assignedProvider = ctx.providers.find((p) => p.id === roleConfig.assignedProviderId) || ctx.providers[0];
   const activeSkills = resolveActiveSkillsText(roleConfig, ctx.skills);
+
+  if (!assignedProvider) {
+    return {
+      roleTitle: 'Mimir',
+      text: 'No AI provider is configured. Open Settings, add a provider, load its models, then try again.',
+      isError: true,
+    };
+  }
+
+  const selectedModel = roleConfig.assignedModel || assignedProvider.selectedModel;
+  progress(`Sending your request to ${assignedProvider.name} using ${selectedModel}.`);
+
+  if (!query.startsWith('/')) {
+    const chatRes = await api.sendChat({
+      providerType: assignedProvider.type,
+      providerUrl: assignedProvider.url,
+      apiKey: assignedProvider.apiKey,
+      model: selectedModel,
+      messages: [
+        ...(ctx.chatHistory || []).slice(-12),
+        { role: 'user', content: query },
+      ],
+      systemPrompt: [
+        ctx.globalPrompt,
+        `You are ${roleConfig.title}, Mimir's conversational reverse-engineering agent.`,
+        `Selected binary: ${ctx.selectedBinary.filename}; function: ${ctx.selectedFunction.demangledName || ctx.selectedFunction.name}; address: ${ctx.selectedFunction.address}.`,
+        `HLIL:\n${ctx.selectedFunction.hlil}`,
+      ].filter(Boolean).join('\n\n'),
+      temperature: roleConfig.temperature,
+    });
+
+    if (chatRes.success && chatRes.message?.content) {
+      progress('Received provider response.');
+      return {
+        roleTitle: `${roleConfig.title} (${selectedModel})`,
+        text: chatRes.message.content,
+      };
+    }
+    return {
+      roleTitle: roleConfig.title,
+      text: chatRes.error || 'The selected provider returned no response.',
+      isError: true,
+    };
+  }
 
   const res = await api.dispatchRole({
     role: targetRole,
