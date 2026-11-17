@@ -1,0 +1,6 @@
+{
+  "name": "Rikugan-X: Binary Ninja & Frida AI Orchestrator",
+  "description": "Professional Binary Ninja reverse engineering assistant and Frida runtime analysis studio with multi-agent role dispatch, ACP agent protocol, OpenAI-compatible model discovery, and smart patching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
