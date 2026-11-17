@@ -170,7 +170,7 @@ export const api = {
   /**
    * Frida device management
    */
-  async getFridaDevices(): Promise<{ success: boolean; devices: FridaDevice[]; error?: string }> {
+  async getFridaDevices(): Promise<{ success: boolean; mode?: 'real' | 'simulation'; devices: FridaDevice[]; error?: string }> {
     try {
       const res = await fetch('/api/frida/devices');
       return await res.json();
@@ -182,7 +182,7 @@ export const api = {
   /**
    * Get processes on selected device
    */
-  async getFridaProcesses(deviceId: string): Promise<{ success: boolean; processes: FridaProcess[]; error?: string }> {
+  async getFridaProcesses(deviceId: string): Promise<{ success: boolean; mode?: 'real' | 'simulation'; processes: FridaProcess[]; error?: string }> {
     try {
       const res = await fetch('/api/frida/processes', {
         method: 'POST',
@@ -201,7 +201,7 @@ export const api = {
   async spawnFridaApp(
     deviceId: string,
     bundleId: string
-  ): Promise<{ success: boolean; process?: FridaProcess; logs: FridaLogItem[]; error?: string }> {
+  ): Promise<{ success: boolean; mode?: 'real' | 'simulation'; process?: FridaProcess; logs: FridaLogItem[]; error?: string }> {
     try {
       const res = await fetch('/api/frida/spawn', {
         method: 'POST',
@@ -222,7 +222,7 @@ export const api = {
     pid: number;
     script: string;
     scriptType: string;
-  }): Promise<{ success: boolean; sessionId?: string; logs: FridaLogItem[]; error?: string }> {
+  }): Promise<{ success: boolean; mode?: 'real' | 'simulation'; sessionId?: string; logs: FridaLogItem[]; error?: string }> {
     try {
       const res = await fetch('/api/frida/run-script', {
         method: 'POST',

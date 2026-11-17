@@ -181,6 +181,7 @@ function customizeTemplateForTarget(baseScript: string, hookTarget?: string): st
 
 export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) => {
   const [devices, setDevices] = useState<FridaDevice[]>([]);
+  const [fridaMode, setFridaMode] = useState<'real' | 'simulation'>('simulation');
   const [selectedDevice, setSelectedDevice] = useState<FridaDevice | null>(null);
   const [processes, setProcesses] = useState<FridaProcess[]>([]);
   const [selectedProcess, setSelectedProcess] = useState<FridaProcess | null>(null);
@@ -202,6 +203,7 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
   useEffect(() => {
     async function initDevices() {
       const res = await api.getFridaDevices();
+      if (res.mode) setFridaMode(res.mode);
       if (res.success && res.devices.length > 0) {
         setDevices(res.devices);
         setSelectedDevice(res.devices[0]);
@@ -353,8 +355,8 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
           <div className="flex items-center gap-2">
             <Smartphone className="w-4 h-4 text-cyan-400" />
             <span className="text-xs font-semibold text-white">Target Device:</span>
-            <span className="rounded border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[10px] font-bold tracking-wider text-amber-300">
-              SIMULATION MODE
+            <span className={`rounded border px-2 py-0.5 text-[10px] font-bold tracking-wider ${fridaMode === 'real' ? 'border-emerald-500/50 bg-emerald-950/50 text-emerald-300' : 'border-amber-500/50 bg-amber-950/50 text-amber-300'}`}>
+              {fridaMode === 'real' ? 'REAL FRIDA' : 'SIMULATION MODE'}
             </span>
             <select
               value={selectedDevice?.id || ''}

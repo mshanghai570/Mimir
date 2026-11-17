@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { readFileSync } from 'fs';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { ProviderStore } from './server/providerStore';
@@ -17,6 +18,27 @@ const HOST = process.env.HOST || '127.0.0.1';
 const ACCESS_TOKEN = process.env.MIMIR_ACCESS_TOKEN?.trim() || '';
 const ALLOW_PRIVATE_OUTBOUND = process.env.MIMIR_ALLOW_PRIVATE_OUTBOUND === 'true';
 const providerStore = new ProviderStore();
+const FRIDA_MODE = process.env.MIMIR_FRIDA_MODE === 'real' ? 'real' : 'simulation';
+
+function runFridaBridge(command: string, payload: Record<string, unknown>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.PYTHON || 'python3', [path.resolve(__dirname, 'frida-bridge/bridge.py'), command]);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0 && !stdout) return reject(new Error(stderr || `Frida bridge exited with code ${code}`));
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        reject(new Error(stderr || 'Frida bridge returned invalid JSON.'));
+      }
+    });
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
 
 app.use(express.json({ limit: '15mb' }));
 if (!['127.0.0.1', '::1', 'localhost'].includes(HOST) && !ACCESS_TOKEN) {
@@ -797,14 +819,30 @@ const mockProcesses: Record<string, Array<{ pid: number; name: string; bundleId:
   ],
 };
 
-app.get('/api/frida/devices', (_req, res) => {
-  return res.json({ success: true, devices: mockDevices });
+app.get('/api/frida/devices', async (_req, res) => {
+  if (FRIDA_MODE === 'real') {
+    try {
+      const result = await runFridaBridge('list_devices', {});
+      return res.status(result.success ? 200 : 503).json(result);
+    } catch (error: any) {
+      return res.status(503).json({ success: false, mode: 'real', devices: [], error: error.message });
+    }
+  }
+  return res.json({ success: true, mode: 'simulation', devices: mockDevices });
 });
 
-app.post('/api/frida/processes', (req, res) => {
+app.post('/api/frida/processes', async (req, res) => {
   const { deviceId } = req.body;
+  if (FRIDA_MODE === 'real') {
+    try {
+      const result = await runFridaBridge('list_processes', { deviceId });
+      return res.status(result.success ? 200 : 503).json(result);
+    } catch (error: any) {
+      return res.status(503).json({ success: false, mode: 'real', processes: [], error: error.message });
+    }
+  }
   const list = mockProcesses[deviceId] || mockProcesses['local_darwin_host'];
-  return res.json({ success: true, processes: list });
+  return res.json({ success: true, mode: 'simulation', processes: list });
 });
 
 app.post('/api/frida/spawn', (req, res) => {
@@ -813,6 +851,11 @@ app.post('/api/frida/spawn', (req, res) => {
     return res.status(400).json({ success: false, error: 'Bundle ID is required to spawn application.' });
   }
   const cleanBundle = bundleId.trim();
+  if (FRIDA_MODE === 'real') {
+    return runFridaBridge('spawn', { deviceId, bundleId: cleanBundle })
+      .then((result) => res.status(result.success ? 200 : 503).json({ ...result, mode: 'real', logs: [] }))
+      .catch((error: any) => res.status(503).json({ success: false, mode: 'real', logs: [], error: error.message }));
+  }
   const device = mockDevices.find((d) => d.id === deviceId) || mockDevices[0];
   const spawnedPid = Math.floor(20000 + Math.random() * 10000);
   const newProc = {
@@ -865,6 +908,12 @@ app.post('/api/frida/run-script', (req, res) => {
       ],
       error: 'Unbalanced braces in Frida script',
     });
+  }
+
+  if (FRIDA_MODE === 'real') {
+    return runFridaBridge('run_script', { deviceId, pid, script: scriptSource })
+      .then((result) => res.status(result.success ? 200 : 503).json({ ...result, mode: 'real', logs: [] }))
+      .catch((error: any) => res.status(503).json({ success: false, mode: 'real', logs: [], error: error.message }));
   }
 
   const now = Date.now();
@@ -955,6 +1004,7 @@ app.post('/api/frida/run-script', (req, res) => {
 
   return res.json({
     success: true,
+    mode: 'simulation',
     sessionId: `frida_sess_${now}`,
     logs,
   });
