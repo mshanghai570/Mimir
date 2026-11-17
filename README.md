@@ -4,7 +4,7 @@
   <img src="assets/mimir-mascot.png" alt="Mimir geometric cyber-guardian mascot" width="420">
 </p>
 
-Mimir’s visual mark is an original cyber-guardian: a geometric owl-wolf silhouette, a faceted analysis eye, circuit traces, and a weathered signal-print palette. It is meant to feel like a field emblem for reverse engineering rather than a generic AI logo.
+Mimir’s visual mark is a weathered guardian emblem with a faceted analysis eye, circuit-like geometry, and a retro signal-print palette.
 
 This repository contains two related pieces:
 
