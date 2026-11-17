@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   AgentRoleConfig,
   AIProvider,
@@ -9,19 +9,15 @@ import {
 import {
   Sparkles,
   Play,
-  Cpu,
   Layers,
   CheckCircle2,
   AlertCircle,
   Copy,
-  Sliders,
-  ChevronRight,
-  ShieldCheck,
-  Zap,
-  Terminal,
-  FileText,
+  Check,
 } from 'lucide-react';
 import { api } from '../services/api';
+import { resolveActiveSkillsText } from '../utils/agentIntent';
+import { FormattedOutput } from './FormattedOutput';
 
 interface MultiAgentBoardProps {
   roles: AgentRoleConfig[];
@@ -30,6 +26,7 @@ interface MultiAgentBoardProps {
   skills: AgentSkill[];
   selectedBinary: BinarySample;
   selectedFunction: DisassemblyFunction;
+  globalPrompt?: string;
 }
 
 export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
@@ -39,15 +36,27 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
   skills,
   selectedBinary,
   selectedFunction,
+  globalPrompt,
 }) => {
   const [objective, setObjective] = useState(
     `Analyze function ${selectedFunction.demangledName || selectedFunction.name} at ${selectedFunction.address}. Recover algorithm semantics, verify vulnerabilities, calculate an ARM64 patch, and produce an iOS Frida bypass hook.`
   );
+  const [hasEditedObjective, setHasEditedObjective] = useState(false);
   const [isDispatchingAll, setIsDispatchingAll] = useState(false);
-  const [selectedRoleTab, setSelectedRoleTab] = useState<string>('matrix');
-  const [outputs, setOutputs] = useState<Record<string, { output: string; modelUsed: string; timestamp: string }>>({});
+  const [copiedReport, setCopiedReport] = useState(false);
+  const [outputs, setOutputs] = useState<
+    Record<string, { output: string; modelUsed: string; timestamp: string; isError?: boolean }>
+  >({});
 
-  // Preset objectives
+  // Keep default objective synced when switching functions unless manually customized
+  useEffect(() => {
+    if (!hasEditedObjective) {
+      setObjective(
+        `Analyze function ${selectedFunction.demangledName || selectedFunction.name} at ${selectedFunction.address}. Recover algorithm semantics, verify vulnerabilities, calculate an ARM64 patch, and produce an iOS Frida bypass hook.`
+      );
+    }
+  }, [selectedFunction.id, selectedBinary.id, hasEditedObjective]);
+
   const presetObjectives = [
     {
       label: 'Full Reverse Engineering & Bypass Pipeline',
@@ -67,11 +76,11 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
     },
   ];
 
-  // Dispatch single agent
   const runAgent = async (roleConfig: AgentRoleConfig) => {
     onUpdateRole({ ...roleConfig, status: 'running' });
 
     const assignedProvider = providers.find((p) => p.id === roleConfig.assignedProviderId) || providers[0];
+    const activeSkills = resolveActiveSkillsText(roleConfig, skills);
 
     try {
       const res = await api.dispatchRole({
@@ -81,6 +90,10 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
           providerUrl: assignedProvider?.url,
           apiKey: assignedProvider?.apiKey,
           model: roleConfig.assignedModel,
+          customPrompt: roleConfig.customPrompt,
+          globalPrompt,
+          temperature: roleConfig.temperature,
+          skills: activeSkills,
         },
         objective,
         context: {
@@ -95,7 +108,7 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
         },
       });
 
-      if (res.success) {
+      if (res.success && res.output) {
         onUpdateRole({ ...roleConfig, status: 'completed', lastOutput: res.output });
         setOutputs((prev) => ({
           ...prev,
@@ -107,59 +120,34 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
         }));
       } else {
         onUpdateRole({ ...roleConfig, status: 'error' });
+        setOutputs((prev) => ({
+          ...prev,
+          [roleConfig.id]: {
+            output: res.error || 'Agent dispatch failed. Verify AI provider credentials or model configuration.',
+            modelUsed: roleConfig.assignedModel,
+            timestamp: new Date().toLocaleTimeString(),
+            isError: true,
+          },
+        }));
       }
-    } catch {
+    } catch (err: any) {
       onUpdateRole({ ...roleConfig, status: 'error' });
+      setOutputs((prev) => ({
+        ...prev,
+        [roleConfig.id]: {
+          output: err.message || 'Network failure dispatching role.',
+          modelUsed: roleConfig.assignedModel,
+          timestamp: new Date().toLocaleTimeString(),
+          isError: true,
+        },
+      }));
     }
   };
 
-  // Dispatch All Agents in Parallel / Staged Pipeline
   const handleDispatchAll = async () => {
     setIsDispatchingAll(true);
-    for (const r of roles) {
-      onUpdateRole({ ...r, status: 'running' });
-    }
-
     try {
-      await Promise.all(
-        roles.map(async (role) => {
-          const assignedProvider = providers.find((p) => p.id === role.assignedProviderId) || providers[0];
-          const res = await api.dispatchRole({
-            role: role.id,
-            agentConfig: {
-              providerType: assignedProvider?.type,
-              providerUrl: assignedProvider?.url,
-              apiKey: assignedProvider?.apiKey,
-              model: role.assignedModel,
-            },
-            objective,
-            context: {
-              binaryName: selectedBinary.filename,
-              arch: selectedBinary.arch,
-              functionName: selectedFunction.demangledName || selectedFunction.name,
-              address: selectedFunction.address,
-              hlil: selectedFunction.hlil,
-              assembly: selectedFunction.instructions
-                .map((i) => `${i.address}: ${i.rawBytes.padEnd(12)} ${i.mnemonic} ${i.operands}`)
-                .join('\n'),
-            },
-          });
-
-          if (res.success) {
-            onUpdateRole({ ...role, status: 'completed', lastOutput: res.output });
-            setOutputs((prev) => ({
-              ...prev,
-              [role.id]: {
-                output: res.output,
-                modelUsed: res.modelUsed || role.assignedModel,
-                timestamp: new Date().toLocaleTimeString(),
-              },
-            }));
-          } else {
-            onUpdateRole({ ...role, status: 'error' });
-          }
-        })
-      );
+      await Promise.all(roles.map((role) => runAgent(role)));
     } finally {
       setIsDispatchingAll(false);
     }
@@ -174,39 +162,41 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
             <Sparkles className="w-4 h-4 text-cyan-400" />
             <span className="text-xs font-semibold text-white">Multi-Agent Task Dispatcher</span>
             <span className="text-slate-600 font-mono">·</span>
-            <span className="text-xs text-slate-400 font-mono">Role Optimization & Multi-Provider Mix</span>
+            <span className="text-xs text-slate-400 font-mono">
+              Target: {selectedBinary.filename} → {selectedFunction.demangledName || selectedFunction.name}
+            </span>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleDispatchAll}
-              disabled={isDispatchingAll || !objective.trim()}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded-md transition-all shadow-sm disabled:opacity-50"
-            >
-              <Play className="w-3.5 h-3.5 fill-slate-950" />
-              <span>{isDispatchingAll ? 'Coordinating All Agents...' : 'Dispatch All 6 Agents'}</span>
-            </button>
-          </div>
+          <button
+            onClick={handleDispatchAll}
+            disabled={isDispatchingAll || !objective.trim()}
+            className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded-md transition-all shadow-sm disabled:opacity-50"
+          >
+            <Play className="w-3.5 h-3.5 fill-slate-950" />
+            <span>{isDispatchingAll ? 'Coordinating All Agents...' : `Dispatch All ${roles.length} Agents`}</span>
+          </button>
         </div>
 
-        {/* Global Objective Input */}
-        <div className="relative">
-          <textarea
-            value={objective}
-            onChange={(e) => setObjective(e.target.value)}
-            rows={2}
-            placeholder="Describe overall reverse engineering objective for the team..."
-            className="w-full bg-[#0a0d15] border border-slate-700/80 rounded-lg p-3 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-cyan-500 leading-relaxed resize-none"
-          />
-        </div>
+        <textarea
+          value={objective}
+          onChange={(e) => {
+            setHasEditedObjective(true);
+            setObjective(e.target.value);
+          }}
+          rows={2}
+          placeholder="Describe overall reverse engineering objective for the team..."
+          className="w-full bg-[#0a0d15] border border-slate-700/80 rounded-lg p-3 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-cyan-500 leading-relaxed resize-none"
+        />
 
-        {/* Quick Presets */}
         <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pt-1">
           <span className="text-[11px] text-slate-500 shrink-0 font-medium">Quick Objective:</span>
           {presetObjectives.map((p, idx) => (
             <button
               key={idx}
-              onClick={() => setObjective(p.text)}
+              onClick={() => {
+                setHasEditedObjective(true);
+                setObjective(p.text);
+              }}
               className="px-2.5 py-1 text-[11px] bg-slate-800/60 hover:bg-slate-800 text-slate-300 rounded border border-slate-700/60 transition-colors whitespace-nowrap shrink-0"
             >
               {p.label}
@@ -254,9 +244,7 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
                           </span>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-                        {role.tagline}
-                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">{role.tagline}</div>
                     </div>
 
                     <button
@@ -268,7 +256,6 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
                     </button>
                   </div>
 
-                  {/* Provider & Model Selectors */}
                   <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                     <div>
                       <label className="text-[10px] text-slate-500 block mb-1">AI Provider</label>
@@ -310,7 +297,6 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
                     </div>
                   </div>
 
-                  {/* Role Custom Prompt */}
                   <div>
                     <label className="text-[10px] text-slate-500 block mb-1">Behavior & Prompt Directive</label>
                     <input
@@ -340,11 +326,14 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
                   .map(([k, v]) => `=== [AGENT: ${k.toUpperCase()}] (Model: ${v.modelUsed}) ===\n${v.output}`)
                   .join('\n\n');
                 navigator.clipboard.writeText(fullText);
+                setCopiedReport(true);
+                setTimeout(() => setCopiedReport(false), 1800);
               }}
-              className="flex items-center gap-1.5 px-3 py-1 text-slate-300 hover:text-white bg-slate-800 rounded border border-slate-700 text-xs"
+              disabled={Object.keys(outputs).length === 0}
+              className="flex items-center gap-1.5 px-3 py-1 text-slate-300 hover:text-white bg-slate-800 rounded border border-slate-700 text-xs disabled:opacity-50"
             >
-              <Copy className="w-3 h-3" />
-              <span>Copy Full Report</span>
+              {copiedReport ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+              <span>{copiedReport ? 'Copied' : 'Copy Full Report'}</span>
             </button>
           </div>
 
@@ -360,7 +349,7 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
                 </div>
                 <h3 className="text-base font-semibold text-white">Multi-Agent Reverse Engineering Team Ready</h3>
                 <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-                  Assign each agent role to your preferred AI model from any OpenAI-compatible endpoint or Gemini, then click "Dispatch All 6 Agents" to start parallel analysis.
+                  Assign each agent role to your preferred AI model from any OpenAI-compatible endpoint or Gemini, then click "Dispatch All {roles.length} Agents" to start parallel analysis.
                 </p>
               </div>
             ) : (
@@ -370,17 +359,24 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
                   if (!out) return null;
 
                   return (
-                    <div key={role.id} className="bg-[#0b0f17] border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+                    <div
+                      key={role.id}
+                      className={`rounded-xl overflow-hidden shadow-lg border ${
+                        out.isError ? 'bg-rose-950/20 border-rose-800/60' : 'bg-[#0b0f17] border-slate-800'
+                      }`}
+                    >
                       <div className="p-3 bg-[#0e131f] border-b border-slate-800 flex items-center justify-between text-xs">
                         <div className="flex items-center gap-2">
-                          <span className="font-bold text-cyan-400">{role.title}</span>
+                          <span className={`font-bold ${out.isError ? 'text-rose-400' : 'text-cyan-400'}`}>
+                            {role.title}
+                          </span>
                           <span className="text-slate-600 font-mono">·</span>
                           <span className="text-slate-400 font-mono text-[11px]">{out.modelUsed}</span>
                         </div>
                         <span className="text-[10px] text-slate-500 font-mono">{out.timestamp}</span>
                       </div>
-                      <div className="p-4 font-mono text-xs text-slate-200 leading-relaxed whitespace-pre-wrap select-all bg-[#080b12]">
-                        {out.output}
+                      <div className="p-4 text-xs text-slate-200 bg-[#080b12]">
+                        <FormattedOutput text={out.output} />
                       </div>
                     </div>
                   );

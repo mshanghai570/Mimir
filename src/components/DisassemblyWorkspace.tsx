@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   BinarySample,
   DisassemblyFunction,
   InstructionLine,
   AIProvider,
   AgentRoleConfig,
+  AgentSkill,
   PatchRecord,
 } from '../types';
 import {
@@ -14,17 +15,17 @@ import {
   Search,
   Sparkles,
   Zap,
-  ArrowRight,
-  ShieldCheck,
   Send,
   Terminal,
   Cpu,
-  CheckCircle2,
   Bot,
-  MessageSquare,
+  Copy,
+  Check,
+  GitBranch,
 } from 'lucide-react';
-import { api } from '../services/api';
 import { MimirFloatingChat } from './MimirFloatingChat';
+import { executeNaturalLanguageIntent } from '../utils/agentIntent';
+import { FormattedOutput } from './FormattedOutput';
 
 interface DisassemblyWorkspaceProps {
   binaries: BinarySample[];
@@ -35,8 +36,75 @@ interface DisassemblyWorkspaceProps {
   onNavigateToPatcher: (targetAddress?: string) => void;
   onNavigateToFrida: (hookTarget?: string) => void;
   onApplyPatch?: (patch: PatchRecord) => void;
+  patches?: PatchRecord[];
   providers: AIProvider[];
   roles: AgentRoleConfig[];
+  skills?: AgentSkill[];
+  globalPrompt?: string;
+}
+
+interface BasicBlock {
+  id: string;
+  startAddr: string;
+  instructions: InstructionLine[];
+  branchTarget?: string;
+  fallthroughAddr?: string;
+  endsWithReturn: boolean;
+}
+
+function buildControlFlowBlocks(instructions: InstructionLine[]): BasicBlock[] {
+  if (instructions.length === 0) return [];
+
+  // Identify block leaders (first instruction, branch targets, instructions after branches/returns)
+  const leaderAddresses = new Set<string>([instructions[0].address]);
+  for (let i = 0; i < instructions.length; i++) {
+    const inst = instructions[i];
+    if (inst.isBranch || inst.isReturn) {
+      if (inst.isBranch && inst.operands) {
+        const addrMatch = inst.operands.match(/0x[0-9a-fA-F]+/);
+        if (addrMatch) leaderAddresses.add(addrMatch[0].toLowerCase());
+      }
+      if (i + 1 < instructions.length) {
+        leaderAddresses.add(instructions[i + 1].address.toLowerCase());
+      }
+    }
+  }
+
+  const blocks: BasicBlock[] = [];
+  let current: InstructionLine[] = [];
+
+  for (let i = 0; i < instructions.length; i++) {
+    const inst = instructions[i];
+    const isLeader = i > 0 && leaderAddresses.has(inst.address.toLowerCase());
+    if (isLeader && current.length > 0) {
+      const last = current[current.length - 1];
+      const addrMatch = last.isBranch ? last.operands.match(/0x[0-9a-fA-F]+/) : null;
+      blocks.push({
+        id: `bb_${current[0].address}`,
+        startAddr: current[0].address,
+        instructions: current,
+        branchTarget: addrMatch ? addrMatch[0] : undefined,
+        fallthroughAddr: !last.isReturn ? inst.address : undefined,
+        endsWithReturn: Boolean(last.isReturn),
+      });
+      current = [];
+    }
+    current.push(inst);
+  }
+
+  if (current.length > 0) {
+    const last = current[current.length - 1];
+    const addrMatch = last.isBranch ? last.operands.match(/0x[0-9a-fA-F]+/) : null;
+    blocks.push({
+      id: `bb_${current[0].address}`,
+      startAddr: current[0].address,
+      instructions: current,
+      branchTarget: addrMatch ? addrMatch[0] : undefined,
+      endsWithReturn: Boolean(last.isReturn),
+    });
+  }
+
+  return blocks;
 }
 
 export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
@@ -48,8 +116,11 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
   onNavigateToPatcher,
   onNavigateToFrida,
   onApplyPatch,
+  patches = [],
   providers,
   roles,
+  skills,
+  globalPrompt,
 }) => {
   const [viewMode, setViewMode] = useState<'disasm' | 'hlil' | 'cfg'>('disasm');
   const [functionSearch, setFunctionSearch] = useState('');
@@ -57,30 +128,56 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
   const [selectedInstruction, setSelectedInstruction] = useState<InstructionLine | null>(
     selectedFunction.instructions[0] || null
   );
+  const [copiedHlil, setCopiedHlil] = useState(false);
 
-  // Floating Mimir AI Agent Popup State
-  const [isMimirPopupOpen, setIsMimirPopupOpen] = useState(true);
+  // Floating Mimir AI Agent Popup State (closed by default to keep disassembly unobstructed, toggleable from dock or header)
+  const [isMimirPopupOpen, setIsMimirPopupOpen] = useState(false);
 
   // Mimir Agent Console State
   const [agentInput, setAgentInput] = useState('');
   const [consoleLogs, setConsoleLogs] = useState<Array<{ sender: string; text: string; time: string; type?: string }>>([
     {
       sender: 'Mimir Core',
-      text: `Mimir autonomous Binary Ninja & Frida agent initialized for ${selectedBinary.filename} (${selectedBinary.arch}). Type queries like "find purchase related functions." or "patch this function X." to act.`,
-      time: '12:00:01',
+      text: `Mimir autonomous Binary Ninja & Frida agent initialized for ${selectedBinary.filename} (${selectedBinary.arch}). Type queries like "find purchase related functions." or "patch this function to return true" to act.`,
+      time: 'Ready',
       type: 'system',
     },
   ]);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  const filteredFunctions = selectedBinary.functions.filter(
-    (f) =>
-      f.name.toLowerCase().includes(functionSearch.toLowerCase()) ||
-      (f.demangledName && f.demangledName.toLowerCase().includes(functionSearch.toLowerCase())) ||
-      f.address.toLowerCase().includes(functionSearch.toLowerCase())
+  // Keep selectedInstruction synced when selectedFunction changes
+  useEffect(() => {
+    setSelectedInstruction(selectedFunction.instructions[0] || null);
+  }, [selectedFunction.id]);
+
+  // Index active patches by address for O(1) inline lookup
+  const patchByAddress = useMemo(() => {
+    const map = new Map<string, PatchRecord>();
+    for (const p of patches) {
+      if (p.binaryName === selectedBinary.filename) {
+        map.set(p.address.toLowerCase(), p);
+      }
+    }
+    return map;
+  }, [patches, selectedBinary.filename]);
+
+  const filteredFunctions = useMemo(() => {
+    const q = functionSearch.toLowerCase().trim();
+    if (!q) return selectedBinary.functions;
+    return selectedBinary.functions.filter(
+      (f) =>
+        f.name.toLowerCase().includes(q) ||
+        (f.demangledName && f.demangledName.toLowerCase().includes(q)) ||
+        f.address.toLowerCase().includes(q) ||
+        f.strings.some((s) => s.toLowerCase().includes(q))
+    );
+  }, [selectedBinary.functions, functionSearch]);
+
+  const basicBlocks = useMemo(
+    () => buildControlFlowBlocks(selectedFunction.instructions),
+    [selectedFunction.instructions]
   );
 
-  // Handle Mimir Natural Language Intent Understanding & Autonomous Action
   const handleAgentSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!agentInput.trim() || isProcessing) return;
@@ -88,216 +185,36 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
     const query = agentInput.trim();
     setAgentInput('');
     const timeStr = new Date().toLocaleTimeString();
-    const lowerQuery = query.toLowerCase();
 
-    setConsoleLogs((prev) => [
-      ...prev,
-      { sender: 'User', text: query, time: timeStr, type: 'user' },
-    ]);
+    setConsoleLogs((prev) => [...prev, { sender: 'User', text: query, time: timeStr, type: 'user' }]);
     setIsProcessing(true);
 
-    // ========================================================
-    // 1. Natural Language Semantic Function Search
-    // e.g. "find purchase related functions.", "search auth functions"
-    // ========================================================
-    const isSearchIntent =
-      lowerQuery.includes('find') ||
-      lowerQuery.includes('search') ||
-      lowerQuery.includes('locate') ||
-      lowerQuery.includes('where is') ||
-      lowerQuery.includes('where are');
-
-    if (isSearchIntent && (lowerQuery.includes('function') || lowerQuery.includes('routine') || lowerQuery.includes('method') || lowerQuery.includes('purchase') || lowerQuery.includes('store') || lowerQuery.includes('receipt') || lowerQuery.includes('license') || lowerQuery.includes('crypto') || lowerQuery.includes('jailbreak'))) {
-      let searchKeyword = 'purchase';
-      if (lowerQuery.includes('purchase') || lowerQuery.includes('store') || lowerQuery.includes('buy') || lowerQuery.includes('iap')) {
-        searchKeyword = 'purchase';
-      } else if (lowerQuery.includes('receipt')) {
-        searchKeyword = 'receipt';
-      } else if (lowerQuery.includes('license') || lowerQuery.includes('verify')) {
-        searchKeyword = 'license';
-      } else if (lowerQuery.includes('device') || lowerQuery.includes('jailbreak') || lowerQuery.includes('safe')) {
-        searchKeyword = 'device';
-      } else if (lowerQuery.includes('crypto') || lowerQuery.includes('enclave')) {
-        searchKeyword = 'crypto';
-      } else {
-        const cleaned = lowerQuery.replace(/(?:find|search|show|locate|where|is|are|the|related|functions|routines|methods|please|\.)/g, '').trim();
-        if (cleaned) searchKeyword = cleaned;
-      }
-
-      // Match functions in binary
-      const matches = selectedBinary.functions.filter((f) => {
-        const corpus = `${f.name} ${f.demangledName || ''} ${f.strings.join(' ')} ${f.hlil}`.toLowerCase();
-        if (searchKeyword === 'purchase') {
-          return corpus.includes('purchase') || corpus.includes('store') || corpus.includes('receipt') || corpus.includes('skpayment');
-        }
-        return corpus.includes(searchKeyword);
-      });
-
-      if (matches.length > 0) {
-        const primaryMatch = matches[0];
-        onSelectFunction(primaryMatch);
-        if (primaryMatch.instructions[0]) setSelectedInstruction(primaryMatch.instructions[0]);
-        setFunctionSearch(searchKeyword);
-
-        const listSummary = matches
-          .map((m, idx) => `${idx + 1}. \`${m.demangledName || m.name}\` @ \`${m.address}\` (${m.size} bytes)`)
-          .join('\n');
-
-        setTimeout(() => {
-          setConsoleLogs((prev) => [
-            ...prev,
-            {
-              sender: 'Mimir Agent (Lead Decompiler)',
-              text: `Discovered ${matches.length} functions associated with "${searchKeyword}" in ${selectedBinary.filename}:\n\n${listSummary}\n\n-> Automatically focused and navigated workspace to \`${primaryMatch.demangledName || primaryMatch.name}\` at address ${primaryMatch.address}. Decompiler and disassembly view updated.`,
-              time: new Date().toLocaleTimeString(),
-              type: 'agent',
-            },
-          ]);
-          setIsProcessing(false);
-        }, 350);
-        return;
-      }
-    }
-
-    // ========================================================
-    // 2. Natural Language Smart Patching
-    // e.g. "patch this function X.", "patch this function", "patch verifyLicense to return true"
-    // ========================================================
-    const isPatchIntent =
-      lowerQuery.includes('patch this function') ||
-      lowerQuery.includes('patch function') ||
-      lowerQuery.startsWith('/patch') ||
-      lowerQuery.startsWith('/modify') ||
-      (lowerQuery.includes('patch') && (lowerQuery.includes('return true') || lowerQuery.includes('nop') || lowerQuery.includes('invert')));
-
-    if (isPatchIntent) {
-      let targetFunc = selectedFunction;
-      for (const f of selectedBinary.functions) {
-        const fName = (f.demangledName || f.name).toLowerCase();
-        if (lowerQuery.includes(f.name.toLowerCase()) || (f.demangledName && lowerQuery.includes(f.demangledName.toLowerCase().split('.')[0]))) {
-          targetFunc = f;
-          break;
-        }
-      }
-
-      // Find critical conditional check instruction in target function
-      const targetInst =
-        targetFunc.instructions.find((i) => i.mnemonic === 'B.NE' || i.mnemonic === 'CBZ') ||
-        targetFunc.instructions[targetFunc.instructions.length - 3] ||
-        targetFunc.instructions[0];
-
-      const isReturnTrue = lowerQuery.includes('return true') || lowerQuery.includes('return 1');
-      const isNOP = lowerQuery.includes('nop');
-      let patchedHex = '1F 20 03 D5';
-      let patchedMnem = 'NOP';
-      let stratName: 'nop_sled' | 'invert_branch' | 'force_return_true' = 'invert_branch';
-
-      if (isReturnTrue) {
-        patchedHex = '20 00 80 D2 C0 03 5F D6';
-        patchedMnem = 'MOV X0, #1; RET';
-        stratName = 'force_return_true';
-      } else if (isNOP || targetInst.mnemonic !== 'B.NE') {
-        patchedHex = '1F 20 03 D5';
-        patchedMnem = 'NOP';
-        stratName = 'nop_sled';
-      } else {
-        patchedHex = '80 01 00 54';
-        patchedMnem = 'B.EQ ' + targetInst.operands;
-        stratName = 'invert_branch';
-      }
-
-      const generatedPatch: PatchRecord = {
-        id: `patch_${Date.now()}`,
-        binaryName: selectedBinary.filename,
-        functionName: targetFunc.demangledName || targetFunc.name,
-        address: targetInst.address,
-        originalBytes: targetInst.rawBytes,
-        patchedBytes: patchedHex,
-        originalMnemonic: `${targetInst.mnemonic} ${targetInst.operands}`.trim(),
-        patchedMnemonic: patchedMnem,
-        strategy: stratName,
-        verifiedArm64: true,
-        appliedAt: new Date().toLocaleTimeString(),
-      };
-
-      if (onApplyPatch) {
-        onApplyPatch(generatedPatch);
-      }
-
-      onSelectFunction(targetFunc);
-      setSelectedInstruction(targetInst);
-
-      setTimeout(() => {
-        setConsoleLogs((prev) => [
-          ...prev,
-          {
-            sender: 'Mimir Agent (Smart Binary Patcher)',
-            text: `Synthesized & applied ARM64 patch for \`${targetFunc.demangledName || targetFunc.name}\` at address \`${targetInst.address}\`:\n\n- Original Instruction: \`${targetInst.rawBytes}\` (${targetInst.mnemonic} ${targetInst.operands})\n- Patched Instruction:  \`${patchedHex}\` (${patchedMnem})\n- Strategy: ${stratName.toUpperCase()}\n- Verification: 4-byte ARM64 alignment verified. Mach-O codesign signature valid.\n\n-> Patch registered into active session patches. Disassembly view updated.`,
-            time: new Date().toLocaleTimeString(),
-            type: 'agent',
-          },
-        ]);
-        setIsProcessing(false);
-      }, 350);
-      return;
-    }
-
-    // ========================================================
-    // 3. General Multi-Agent Dispatch (Decompile, Audit, Frida)
-    // ========================================================
     try {
-      let targetRole: 'decompiler' | 'patcher' | 'frida_tracer' | 'auditor' = 'decompiler';
-      if (query.startsWith('/trace') || lowerQuery.includes('frida') || lowerQuery.includes('hook')) {
-        targetRole = 'frida_tracer';
-      } else if (lowerQuery.includes('vulnerability') || lowerQuery.includes('audit') || lowerQuery.includes('exploit')) {
-        targetRole = 'auditor';
-      }
-
-      const roleConfig = roles.find((r) => r.id === targetRole) || roles[0];
-      const assignedProvider = providers.find((p) => p.id === roleConfig.assignedProviderId) || providers[0];
-
-      const res = await api.dispatchRole({
-        role: targetRole,
-        agentConfig: {
-          providerType: assignedProvider?.type,
-          providerUrl: assignedProvider?.url,
-          apiKey: assignedProvider?.apiKey,
-          model: roleConfig.assignedModel,
-        },
-        objective: query,
-        context: {
-          binaryName: selectedBinary.filename,
-          arch: selectedBinary.arch,
-          functionName: selectedFunction.demangledName || selectedFunction.name,
-          address: selectedInstruction?.address || selectedFunction.address,
-          hlil: selectedFunction.hlil,
-          assembly: selectedFunction.instructions
-            .map((i) => `${i.address}: ${i.rawBytes.padEnd(12)} ${i.mnemonic} ${i.operands}`)
-            .join('\n'),
-        },
+      const result = await executeNaturalLanguageIntent(query, {
+        binaries,
+        selectedBinary,
+        selectedFunction,
+        providers,
+        roles,
+        skills,
+        globalPrompt,
+        onSelectBinary,
+        onSelectFunction,
+        onSelectInstruction: setSelectedInstruction,
+        onSetSearchFilter: setFunctionSearch,
+        onApplyPatch,
+        onNavigateToFrida,
       });
 
-      if (res.success && res.output) {
-        setConsoleLogs((prev) => [
-          ...prev,
-          {
-            sender: `Mimir Agent (${roleConfig.title})`,
-            text: res.output,
-            time: new Date().toLocaleTimeString(),
-            type: 'agent',
-          },
-        ]);
-      } else {
-        setConsoleLogs((prev) => [
-          ...prev,
-          {
-            sender: 'Mimir Agent',
-            text: res.error || 'Failed to complete reverse engineering request. Check AI Provider settings.',
-            time: new Date().toLocaleTimeString(),
-            type: 'error',
-          },
-        ]);
-      }
+      setConsoleLogs((prev) => [
+        ...prev,
+        {
+          sender: `Mimir Agent (${result.roleTitle})`,
+          text: result.text,
+          time: new Date().toLocaleTimeString(),
+          type: result.isError ? 'error' : 'agent',
+        },
+      ]);
     } catch (err: any) {
       setConsoleLogs((prev) => [
         ...prev,
@@ -347,6 +264,12 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
             <span className="truncate max-w-[180px] text-slate-500" title={selectedBinary.sha256}>
               SHA-256: {selectedBinary.sha256.slice(0, 12)}...
             </span>
+            {patchByAddress.size > 0 && (
+              <>
+                <span aria-hidden="true" className="text-slate-600">·</span>
+                <span className="text-amber-400 font-semibold">{patchByAddress.size} Active Patch(es)</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -402,7 +325,6 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
         {/* Binary Ninja Left Activity Sidebar Dock */}
         <div className="w-12 bg-[#080b12] border-r border-slate-800/80 flex flex-col items-center py-3 justify-between shrink-0 select-none z-10">
           <div className="flex flex-col items-center gap-2.5">
-            {/* Mimir AI Assistant Sidebar Button (Floating Pop-up Trigger) */}
             <button
               onClick={() => setIsMimirPopupOpen(!isMimirPopupOpen)}
               className={`relative p-2 rounded-xl transition-all ${
@@ -448,15 +370,12 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
           </div>
 
           <div className="flex flex-col items-center">
-            <span className="text-[9px] font-mono text-cyan-400/80 font-bold uppercase tracking-wider">
-              BINJA
-            </span>
+            <span className="text-[9px] font-mono text-cyan-400/80 font-bold uppercase tracking-wider">BINJA</span>
           </div>
         </div>
 
         {/* Left Sub-Sidebar: Navigation & Symbols */}
         <div className="w-80 bg-[#0c1018] border-r border-slate-800/80 flex flex-col shrink-0">
-          {/* Subtabs: Functions / Strings / XREFs */}
           <div className="flex items-center border-b border-slate-800 text-xs font-medium bg-slate-900/50">
             <button
               onClick={() => setActiveLeftTab('functions')}
@@ -490,13 +409,12 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
             </button>
           </div>
 
-          {/* Search Box */}
           <div className="p-2 border-b border-slate-800/80 bg-[#090d14]">
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
               <input
                 type="text"
-                placeholder="Filter symbols / addresses..."
+                placeholder="Filter symbols / addresses / strings..."
                 value={functionSearch}
                 onChange={(e) => setFunctionSearch(e.target.value)}
                 className="w-full bg-slate-900/90 border border-slate-800 rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-mono"
@@ -504,32 +422,36 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
             </div>
           </div>
 
-          {/* Subtab Contents */}
           <div className="flex-1 overflow-y-auto divide-y divide-slate-800/40 font-mono text-xs">
             {activeLeftTab === 'functions' && (
               <>
-                {filteredFunctions.map((func) => (
-                  <button
-                    key={func.id}
-                    onClick={() => {
-                      onSelectFunction(func);
-                      if (func.instructions[0]) setSelectedInstruction(func.instructions[0]);
-                    }}
-                    className={`w-full text-left px-3 py-2.5 transition-colors flex flex-col gap-0.5 ${
-                      selectedFunction.id === func.id
-                        ? 'bg-cyan-950/40 text-cyan-300 border-l-2 border-cyan-400'
-                        : 'text-slate-300 hover:bg-slate-900/60'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-[11px] text-slate-500">
-                      <span>{func.address}</span>
-                      <span>{func.size} bytes</span>
-                    </div>
-                    <div className="font-semibold text-slate-100 truncate text-[12px]">
-                      {func.demangledName || func.name}
-                    </div>
-                  </button>
-                ))}
+                {filteredFunctions.map((func) => {
+                  const hasPatchedInst = func.instructions.some((i) => patchByAddress.has(i.address.toLowerCase()));
+                  return (
+                    <button
+                      key={func.id}
+                      onClick={() => {
+                        onSelectFunction(func);
+                      }}
+                      className={`w-full text-left px-3 py-2.5 transition-colors flex flex-col gap-0.5 ${
+                        selectedFunction.id === func.id
+                          ? 'bg-cyan-950/40 text-cyan-300 border-l-2 border-cyan-400'
+                          : 'text-slate-300 hover:bg-slate-900/60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-slate-500">
+                        <span>{func.address}</span>
+                        <div className="flex items-center gap-1.5">
+                          {hasPatchedInst && <span className="text-[10px] text-amber-400 font-semibold">PATCHED</span>}
+                          <span>{func.size} bytes</span>
+                        </div>
+                      </div>
+                      <div className="font-semibold text-slate-100 truncate text-[12px]">
+                        {func.demangledName || func.name}
+                      </div>
+                    </button>
+                  );
+                })}
               </>
             )}
 
@@ -556,7 +478,9 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
                   <div key={idx} className="p-2 bg-slate-900/70 rounded border border-slate-800 flex items-center justify-between">
                     <div>
                       <div className="text-cyan-400 font-semibold">{xref.funcName}</div>
-                      <div className="text-[10px] text-slate-500">{xref.fromAddr} · {xref.type.toUpperCase()}</div>
+                      <div className="text-[10px] text-slate-500">
+                        {xref.fromAddr} · {xref.type.toUpperCase()}
+                      </div>
                     </div>
                     <span className="text-[10px] text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">Callsite</span>
                   </div>
@@ -568,17 +492,16 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
 
         {/* Center Canvas & Disassembly Viewport */}
         <div className="flex-1 flex flex-col bg-[#080b12] overflow-hidden">
-          {/* Header of selected function */}
-          <div className="px-6 py-2.5 bg-[#0e131f] border-b border-slate-800/80 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="text-xs font-mono text-cyan-400 font-bold">{selectedFunction.address}</span>
-              <span className="text-slate-600 font-mono">/</span>
-              <span className="text-sm font-semibold text-white truncate max-w-xl">
+          <div className="px-6 py-2.5 bg-[#0e131f] border-b border-slate-800/80 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-xs font-mono text-cyan-400 font-bold shrink-0">{selectedFunction.address}</span>
+              <span className="text-slate-600 font-mono shrink-0">/</span>
+              <span className="text-sm font-semibold text-white truncate">
                 {selectedFunction.demangledName || selectedFunction.name}
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => onNavigateToPatcher(selectedInstruction?.address || selectedFunction.address)}
                 className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium text-amber-300 bg-amber-950/40 border border-amber-800/60 rounded hover:bg-amber-900/60 transition-colors"
@@ -602,36 +525,40 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
           <div className="flex-1 overflow-auto p-4 font-mono text-xs bg-[#070a10]">
             {viewMode === 'disasm' && (
               <div className="divide-y divide-slate-800/30">
-                {selectedFunction.instructions.map((inst, index) => {
+                {selectedFunction.instructions.map((inst) => {
                   const isSelected = selectedInstruction?.address === inst.address;
+                  const activePatch = patchByAddress.get(inst.address.toLowerCase());
                   const isTargetCheck = inst.mnemonic === 'B.NE' || inst.mnemonic === 'CBZ';
 
                   return (
                     <div
-                      key={index}
+                      key={inst.address}
                       onClick={() => setSelectedInstruction(inst)}
                       className={`flex items-start gap-4 py-1.5 px-3 rounded transition-colors group cursor-pointer ${
-                        isSelected
+                        activePatch
+                          ? 'bg-emerald-950/20 border-l-2 border-emerald-400 text-emerald-100'
+                          : isSelected
                           ? 'bg-cyan-950/40 border-l-2 border-cyan-400 text-white'
                           : isTargetCheck
                           ? 'bg-amber-950/15 hover:bg-amber-950/30 text-amber-100'
                           : 'hover:bg-slate-900/60 text-slate-300'
                       }`}
                     >
-                      {/* Address */}
-                      <span className="w-24 shrink-0 text-slate-500 select-all font-mono">
-                        {inst.address}
+                      <span className="w-24 shrink-0 text-slate-500 select-all font-mono">{inst.address}</span>
+
+                      <span className="w-28 shrink-0 font-mono select-all tracking-wider">
+                        {activePatch ? (
+                          <span className="text-emerald-300 font-semibold">{activePatch.patchedBytes.slice(0, 11)}</span>
+                        ) : (
+                          <span className="text-slate-600">{inst.rawBytes}</span>
+                        )}
                       </span>
 
-                      {/* Raw Opcode Hex */}
-                      <span className="w-28 shrink-0 text-slate-600 font-mono select-all tracking-wider">
-                        {inst.rawBytes}
-                      </span>
-
-                      {/* Mnemonic */}
                       <span
                         className={`w-16 shrink-0 font-bold ${
-                          inst.isBranch
+                          activePatch
+                            ? 'text-emerald-400'
+                            : inst.isBranch
                             ? 'text-amber-400'
                             : inst.isCall
                             ? 'text-cyan-400'
@@ -640,26 +567,27 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
                             : 'text-sky-300'
                         }`}
                       >
-                        {inst.mnemonic}
+                        {activePatch ? activePatch.patchedMnemonic.split(' ')[0] : inst.mnemonic}
                       </span>
 
-                      {/* Operands */}
                       <span className="w-56 shrink-0 text-slate-200 truncate">
-                        {inst.operands}
+                        {activePatch
+                          ? activePatch.patchedMnemonic.split(' ').slice(1).join(' ')
+                          : inst.operands}
                       </span>
 
-                      {/* Inline Comments & Annotations */}
-                      <div className="flex-1 flex items-center justify-between text-slate-400">
-                        {inst.comment ? (
+                      <div className="flex-1 flex items-center justify-between text-slate-400 min-w-0">
+                        {activePatch ? (
                           <span className="text-emerald-400/90 italic truncate">
-                            ; {inst.comment}
+                            ; [PATCHED from {activePatch.originalMnemonic}] ({activePatch.strategy})
                           </span>
+                        ) : inst.comment ? (
+                          <span className="text-emerald-400/90 italic truncate">; {inst.comment}</span>
                         ) : (
                           <span />
                         )}
 
-                        {/* Quick action pill on hover */}
-                        <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 ml-2">
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 ml-2 shrink-0">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -667,7 +595,7 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
                             }}
                             className="px-1.5 py-0.5 text-[10px] font-sans bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 rounded border border-amber-500/40"
                           >
-                            Patch
+                            {activePatch ? 'Edit Patch' : 'Patch'}
                           </button>
                         </div>
                       </div>
@@ -681,7 +609,20 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
               <div className="p-4 bg-[#0a0e16] rounded-lg border border-slate-800 text-slate-200">
                 <div className="text-xs text-slate-500 mb-3 pb-2 border-b border-slate-800 flex items-center justify-between font-sans">
                   <span>Binary Ninja High-Level Intermediate Language (HLIL)</span>
-                  <span className="text-cyan-400">Type Recovery: Verified</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-cyan-400">Calling Conv: {selectedFunction.callingConv}</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedFunction.hlil);
+                        setCopiedHlil(true);
+                        setTimeout(() => setCopiedHlil(false), 1800);
+                      }}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white text-[11px]"
+                    >
+                      {copiedHlil ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedHlil ? 'Copied' : 'Copy HLIL'}</span>
+                    </button>
+                  </div>
                 </div>
                 <pre className="font-mono text-xs leading-relaxed text-slate-300 overflow-x-auto whitespace-pre">
                   {selectedFunction.hlil}
@@ -690,25 +631,81 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
             )}
 
             {viewMode === 'cfg' && (
-              <div className="flex flex-col items-center justify-center p-6 space-y-4">
-                <div className="relative max-w-4xl w-full rounded-xl overflow-hidden border border-slate-800 bg-[#0d121c] shadow-2xl">
-                  <img
-                    src="/src/assets/images/binja_binary_graph_1794908643543.jpg"
-                    alt="Binary Control Flow Graph"
-                    className="w-full h-auto object-cover opacity-90 hover:opacity-100 transition-opacity"
-                  />
-                  <div className="absolute bottom-3 left-4 right-4 p-3 bg-slate-900/90 backdrop-blur-md rounded-lg border border-slate-700/80 text-xs flex items-center justify-between">
-                    <div>
-                      <div className="font-semibold text-white">Dominator Tree & Basic Block Graph</div>
-                      <div className="text-slate-400 text-[11px]">ARM64 branch prediction verification: 3 basic blocks, 1 critical conditional jump</div>
-                    </div>
-                    <button
-                      onClick={() => onNavigateToPatcher('0x100003fd0')}
-                      className="px-3 py-1 bg-amber-500 text-slate-950 font-semibold rounded hover:bg-amber-400 transition-colors"
-                    >
-                      Patch Conditional Branch (0x100003fd0)
-                    </button>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between px-2 font-sans">
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <GitBranch className="w-4 h-4 text-cyan-400" />
+                    <span className="font-semibold">
+                      Interactive Basic Block CFG ({basicBlocks.length} Basic Blocks)
+                    </span>
                   </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Click any instruction to inspect or patch in Smart Patcher
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {basicBlocks.map((bb, bbIdx) => (
+                    <div
+                      key={bb.id}
+                      className="bg-[#0b1019] border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col"
+                    >
+                      <div className="px-3.5 py-2 bg-[#0e1522] border-b border-slate-800 flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-cyan-300">
+                          Block #{bbIdx + 1} · {bb.startAddr}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {bb.branchTarget && (
+                            <span className="text-amber-300 bg-amber-950/40 border border-amber-800/50 px-1.5 py-0.5 rounded text-[10px]">
+                              Branch &rarr; {bb.branchTarget}
+                            </span>
+                          )}
+                          {bb.fallthroughAddr && (
+                            <span className="text-emerald-300 bg-emerald-950/30 border border-emerald-800/50 px-1.5 py-0.5 rounded text-[10px]">
+                              Next &rarr; {bb.fallthroughAddr}
+                            </span>
+                          )}
+                          {bb.endsWithReturn && (
+                            <span className="text-rose-300 bg-rose-950/30 border border-rose-800/50 px-1.5 py-0.5 rounded text-[10px]">
+                              RET
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 space-y-1 text-[11px]">
+                        {bb.instructions.map((inst) => {
+                          const activePatch = patchByAddress.get(inst.address.toLowerCase());
+                          return (
+                            <div
+                              key={inst.address}
+                              onClick={() => {
+                                setSelectedInstruction(inst);
+                                if (inst.isBranch) onNavigateToPatcher(inst.address);
+                              }}
+                              className={`flex items-center justify-between gap-2 px-2 py-1 rounded cursor-pointer transition-colors ${
+                                activePatch
+                                  ? 'bg-emerald-950/30 text-emerald-200'
+                                  : inst.isBranch
+                                  ? 'bg-amber-950/20 hover:bg-amber-950/40 text-amber-200'
+                                  : 'hover:bg-slate-900/70 text-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 truncate">
+                                <span className="text-slate-500">{inst.address}</span>
+                                <span className="font-bold text-cyan-300">
+                                  {activePatch ? activePatch.patchedMnemonic : `${inst.mnemonic} ${inst.operands}`}
+                                </span>
+                              </div>
+                              {inst.isBranch && (
+                                <span className="text-[10px] text-amber-400 font-sans shrink-0">Patch &rarr;</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -716,26 +713,27 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
 
           {/* Bottom Mimir Agent Console */}
           <div className="h-64 bg-[#0a0d14] border-t border-slate-800/90 flex flex-col shrink-0">
-            {/* Console Bar */}
-            <div className="px-4 py-2 bg-[#0e131d] border-b border-slate-800 flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2">
-                <Terminal className="w-3.5 h-3.5 text-cyan-400" />
-                <span className="font-semibold text-white">Mimir Autonomous Agent Terminal</span>
-                <span className="text-slate-600 font-mono">·</span>
-                <span className="text-slate-400 font-mono">Natural Language: "find purchase related functions.", "patch this function X."</span>
+            <div className="px-4 py-2 bg-[#0e131d] border-b border-slate-800 flex items-center justify-between text-xs gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Terminal className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="font-semibold text-white shrink-0">Mimir Autonomous Agent Terminal</span>
+                <span className="text-slate-600 font-mono hidden xl:inline">·</span>
+                <span className="text-slate-400 font-mono truncate hidden xl:inline">
+                  Natural Language: "find purchase related functions.", "patch this function to return true"
+                </span>
               </div>
-              <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap shrink-0">
                 <button
                   onClick={() => setAgentInput('find purchase related functions.')}
                   className="px-2 py-0.5 text-[11px] text-cyan-300 hover:text-white bg-cyan-950/40 rounded border border-cyan-800/60 transition-colors"
                 >
-                  find purchase related functions.
+                  find purchase
                 </button>
                 <button
                   onClick={() => setAgentInput('patch this function to return true')}
                   className="px-2 py-0.5 text-[11px] text-amber-300 hover:text-white bg-amber-950/30 rounded border border-amber-800/60 transition-colors"
                 >
-                  patch this function X.
+                  patch return true
                 </button>
                 <button
                   onClick={() => setAgentInput('/analyze explain algorithm and state transitions')}
@@ -746,7 +744,6 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Console Log Messages */}
             <div className="flex-1 overflow-y-auto p-3 space-y-2 font-mono text-xs">
               {consoleLogs.map((log, index) => (
                 <div
@@ -762,10 +759,12 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
                   }`}
                 >
                   <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
-                    <span className="font-semibold text-cyan-400">{log.sender}</span>
+                    <span className={`font-semibold ${log.type === 'error' ? 'text-rose-400' : 'text-cyan-400'}`}>
+                      {log.sender}
+                    </span>
                     <span>{log.time}</span>
                   </div>
-                  <div className="whitespace-pre-wrap leading-relaxed">{log.text}</div>
+                  <FormattedOutput text={log.text} className="text-xs font-sans" />
                 </div>
               ))}
               {isProcessing && (
@@ -776,11 +775,10 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
               )}
             </div>
 
-            {/* Input Bar */}
             <form onSubmit={handleAgentSubmit} className="p-2.5 bg-[#090c13] border-t border-slate-800 flex items-center gap-2">
               <input
                 type="text"
-                placeholder='Type something like "find purchase related functions." or "patch this function X."'
+                placeholder='Type something like "find purchase related functions." or "patch this function to return true"'
                 value={agentInput}
                 onChange={(e) => setAgentInput(e.target.value)}
                 disabled={isProcessing}
@@ -808,11 +806,14 @@ export const DisassemblyWorkspace: React.FC<DisassemblyWorkspaceProps> = ({
         onSelectBinary={onSelectBinary}
         selectedFunction={selectedFunction}
         onSelectFunction={onSelectFunction}
+        onSelectInstruction={setSelectedInstruction}
         onNavigateToPatcher={onNavigateToPatcher}
         onNavigateToFrida={onNavigateToFrida}
         onApplyPatch={onApplyPatch}
         providers={providers}
         roles={roles}
+        skills={skills}
+        globalPrompt={globalPrompt}
       />
     </div>
   );

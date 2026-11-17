@@ -46,7 +46,16 @@ export const api = {
    */
   async dispatchRole(params: {
     role: string;
-    agentConfig: any;
+    agentConfig: {
+      providerType?: string;
+      providerUrl?: string;
+      apiKey?: string;
+      model?: string;
+      customPrompt?: string;
+      globalPrompt?: string;
+      temperature?: number;
+      skills?: string[];
+    };
     objective: string;
     context: {
       binaryName: string;
@@ -119,6 +128,25 @@ export const api = {
   },
 
   /**
+   * Spawn fresh application in suspended state
+   */
+  async spawnFridaApp(
+    deviceId: string,
+    bundleId: string
+  ): Promise<{ success: boolean; process?: FridaProcess; logs: FridaLogItem[]; error?: string }> {
+    try {
+      const res = await fetch('/api/frida/spawn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId, bundleId }),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, logs: [], error: err.message };
+    }
+  },
+
+  /**
    * Execute Frida script
    */
   async executeFridaScript(params: {
@@ -142,9 +170,10 @@ export const api = {
   /**
    * Download Binary Ninja plugin bundle
    */
-  async exportPluginBundle(): Promise<{ success: boolean; files: Array<{ filename: string; content: string; type: string }> }> {
+  async exportPluginBundle(endpoint?: string): Promise<{ success: boolean; files: Array<{ filename: string; content: string; type: string }> }> {
     try {
-      const res = await fetch('/api/plugin/export');
+      const query = endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : '';
+      const res = await fetch(`/api/plugin/export${query}`);
       return await res.json();
     } catch {
       return { success: false, files: [] };

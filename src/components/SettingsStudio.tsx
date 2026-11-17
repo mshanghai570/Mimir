@@ -39,6 +39,7 @@ interface SettingsStudioProps {
   onToggleACPAgent: (id: string) => void;
   globalPrompt: string;
   onUpdateGlobalPrompt: (prompt: string) => void;
+  onResetDefaults?: () => void;
 }
 
 export const SettingsStudio: React.FC<SettingsStudioProps> = ({
@@ -54,8 +55,10 @@ export const SettingsStudio: React.FC<SettingsStudioProps> = ({
   onToggleACPAgent,
   globalPrompt,
   onUpdateGlobalPrompt,
+  onResetDefaults,
 }) => {
   const [activeTab, setActiveTab] = useState<'providers' | 'prompts' | 'skills' | 'acp'>('providers');
+  const [refreshingProvId, setRefreshingProvId] = useState<string | null>(null);
 
   // New Provider Form State
   const [newProvName, setNewProvName] = useState('');
@@ -95,6 +98,25 @@ export const SettingsStudio: React.FC<SettingsStudioProps> = ({
       setDiscoveryError(err.message || 'Connection failed');
     } finally {
       setIsDiscovering(false);
+    }
+  };
+
+  const handleRefreshExistingProvider = async (prov: AIProvider) => {
+    setRefreshingProvId(prov.id);
+    try {
+      const res = await api.fetchModels(prov.url, prov.apiKey, prov.type);
+      if (res.success && res.models.length > 0) {
+        onUpdateProvider({
+          ...prov,
+          availableModels: res.models,
+          selectedModel: res.models.some((m) => m.id === prov.selectedModel)
+            ? prov.selectedModel
+            : res.models[0].id,
+          lastFetchedAt: new Date().toLocaleTimeString(),
+        });
+      }
+    } finally {
+      setRefreshingProvId(null);
     }
   };
 
@@ -209,39 +231,50 @@ export const SettingsStudio: React.FC<SettingsStudioProps> = ({
           <span className="text-xs text-slate-400 font-mono">OpenAI Endpoints, Prompts, ACP & Skills</span>
         </div>
 
-        <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
-          <button
-            onClick={() => setActiveTab('providers')}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              activeTab === 'providers' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            AI Providers ({providers.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('prompts')}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              activeTab === 'prompts' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Prompt & Behavior
-          </button>
-          <button
-            onClick={() => setActiveTab('acp')}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              activeTab === 'acp' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            ACP Agents ({acpAgents.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('skills')}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              activeTab === 'skills' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Agent Skills ({skills.length})
-          </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
+            <button
+              onClick={() => setActiveTab('providers')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                activeTab === 'providers' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              AI Providers ({providers.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('prompts')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                activeTab === 'prompts' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Prompt & Behavior
+            </button>
+            <button
+              onClick={() => setActiveTab('acp')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                activeTab === 'acp' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              ACP Agents ({acpAgents.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('skills')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                activeTab === 'skills' ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Agent Skills ({skills.length})
+            </button>
+          </div>
+          {onResetDefaults && (
+            <button
+              onClick={onResetDefaults}
+              className="px-2.5 py-1 text-[11px] font-medium text-slate-400 hover:text-rose-300 bg-slate-900 hover:bg-slate-800 rounded border border-slate-800 transition-colors"
+              title="Reset persisted workspace settings to defaults"
+            >
+              Reset Defaults
+            </button>
+          )}
         </div>
       </div>
 
@@ -445,11 +478,12 @@ export const SettingsStudio: React.FC<SettingsStudioProps> = ({
 
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => handleDiscoverModels(prov.url, prov.apiKey, prov.type)}
-                        className="p-1.5 text-slate-400 hover:text-cyan-300 rounded bg-slate-800/60 border border-slate-700"
+                        onClick={() => handleRefreshExistingProvider(prov)}
+                        disabled={refreshingProvId === prov.id}
+                        className="p-1.5 text-slate-400 hover:text-cyan-300 rounded bg-slate-800/60 border border-slate-700 disabled:opacity-50"
                         title="Re-query /v1/models"
                       >
-                        <RefreshCw className="w-3.5 h-3.5" />
+                        <RefreshCw className={`w-3.5 h-3.5 ${refreshingProvId === prov.id ? 'animate-spin text-cyan-400' : ''}`} />
                       </button>
                       <button
                         onClick={() => onDeleteProvider(prov.id)}

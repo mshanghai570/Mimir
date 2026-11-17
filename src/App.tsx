@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TopBar, ActiveTab } from './components/TopBar';
 import { DisassemblyWorkspace } from './components/DisassemblyWorkspace';
 import { FridaBridge } from './components/FridaBridge';
@@ -24,12 +24,28 @@ import {
   PatchRecord,
 } from './types';
 
+const DEFAULT_GLOBAL_PROMPT = `You are Mimir, an elite Binary Ninja and Frida autonomous reverse engineering agent.
+- Prioritize high-level semantics and type reconstruction from HLIL.
+- Automatically detect protection mechanisms (anti-debugging, jailbreak detection, SSL pinning, hardware enclave verification).
+- When asked to /modify or /patch, calculate surgical ARM64 opcodes and verify 4-byte boundaries.
+- For dynamic tasks, write robust, type-checked Frida hooks for iOS/macOS Swift & Objective-C runtimes.`;
+
+function loadPersisted<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('decompiler');
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
   // Binary Explorer State
-  const [binaries, setBinaries] = useState<BinarySample[]>(sampleBinaries);
+  const [binaries] = useState<BinarySample[]>(sampleBinaries);
   const [selectedBinary, setSelectedBinary] = useState<BinarySample>(sampleBinaries[0]);
   const [selectedFunction, setSelectedFunction] = useState<DisassemblyFunction>(
     sampleBinaries[0].functions[0]
@@ -39,21 +55,61 @@ export default function App() {
   const [patchTargetAddress, setPatchTargetAddress] = useState<string>('0x100003fd0');
   const [fridaHookTarget, setFridaHookTarget] = useState<string>('LicenseManager.verifyLicense');
 
-  // AI & Multi-Agent State
-  const [providers, setProviders] = useState<AIProvider[]>(defaultAIProviders);
-  const [roles, setRoles] = useState<AgentRoleConfig[]>(defaultAgentRoles);
-  const [skills, setSkills] = useState<AgentSkill[]>(defaultAgentSkills);
-  const [acpAgents, setAcpAgents] = useState<ACPAgentConfig[]>(defaultACPAgents);
-  const [patches, setPatches] = useState<PatchRecord[]>([]);
-
-  // Global Prompt Directive
-  const [globalPrompt, setGlobalPrompt] = useState<string>(
-    `You are Mimir, an elite Binary Ninja and Frida autonomous reverse engineering agent.
-- Prioritize high-level semantics and type reconstruction from HLIL.
-- Automatically detect protection mechanisms (anti-debugging, jailbreak detection, SSL pinning, hardware enclave verification).
-- When asked to /modify or /patch, calculate surgical ARM64 opcodes and verify 4-byte boundaries.
-- For dynamic tasks, write robust, type-checked Frida hooks for iOS/macOS Swift & Objective-C runtimes.`
+  // Persisted AI & Multi-Agent State
+  const [providers, setProviders] = useState<AIProvider[]>(() =>
+    loadPersisted('mimir_providers_v1', defaultAIProviders)
   );
+  const [roles, setRoles] = useState<AgentRoleConfig[]>(() =>
+    loadPersisted('mimir_roles_v1', defaultAgentRoles)
+  );
+  const [skills, setSkills] = useState<AgentSkill[]>(() =>
+    loadPersisted('mimir_skills_v1', defaultAgentSkills)
+  );
+  const [acpAgents, setAcpAgents] = useState<ACPAgentConfig[]>(() =>
+    loadPersisted('mimir_acp_v1', defaultACPAgents)
+  );
+  const [patches, setPatches] = useState<PatchRecord[]>(() =>
+    loadPersisted('mimir_patches_v1', [])
+  );
+  const [globalPrompt, setGlobalPrompt] = useState<string>(() =>
+    loadPersisted('mimir_global_prompt_v1', DEFAULT_GLOBAL_PROMPT)
+  );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mimir_providers_v1', JSON.stringify(providers));
+    } catch {}
+  }, [providers]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mimir_roles_v1', JSON.stringify(roles));
+    } catch {}
+  }, [roles]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mimir_skills_v1', JSON.stringify(skills));
+    } catch {}
+  }, [skills]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mimir_acp_v1', JSON.stringify(acpAgents));
+    } catch {}
+  }, [acpAgents]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mimir_patches_v1', JSON.stringify(patches));
+    } catch {}
+  }, [patches]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mimir_global_prompt_v1', JSON.stringify(globalPrompt));
+    } catch {}
+  }, [globalPrompt]);
 
   // Cross-Navigation Handlers
   const handleNavigateToPatcher = (addr?: string) => {
@@ -94,9 +150,7 @@ export default function App() {
   };
 
   const handleToggleSkill = (id: string) => {
-    setSkills((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s))
-    );
+    setSkills((prev) => prev.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)));
   };
 
   // ACP Handlers
@@ -105,23 +159,38 @@ export default function App() {
   };
 
   const handleToggleACPAgent = (id: string) => {
-    setAcpAgents((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, active: !a.active } : a))
-    );
+    setAcpAgents((prev) => prev.map((a) => (a.id === id ? { ...a, active: !a.active } : a)));
   };
 
-  // Patch Handlers
+  // Patch Handlers (replace existing patch at same binary+address so disassembly stays clean)
   const handleApplyPatch = (patch: PatchRecord) => {
-    setPatches((prev) => [patch, ...prev]);
+    setPatches((prev) => [
+      patch,
+      ...prev.filter(
+        (p) =>
+          !(
+            p.binaryName === patch.binaryName &&
+            p.address.toLowerCase() === patch.address.toLowerCase()
+          )
+      ),
+    ]);
   };
 
   const handleRevertPatch = (id: string) => {
     setPatches((prev) => prev.filter((p) => p.id !== id));
   };
 
+  const handleResetDefaults = () => {
+    setProviders(defaultAIProviders);
+    setRoles(defaultAgentRoles);
+    setSkills(defaultAgentSkills);
+    setAcpAgents(defaultACPAgents);
+    setGlobalPrompt(DEFAULT_GLOBAL_PROMPT);
+    setPatches([]);
+  };
+
   return (
     <div className="min-h-screen bg-[#090d14] text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
-      {/* Top Navigation Bar adhering to the Top Bar Contract */}
       <TopBar
         activeTab={activeTab}
         onTabChange={setActiveTab}
@@ -129,7 +198,6 @@ export default function App() {
         onQuickDispatch={handleQuickDispatch}
       />
 
-      {/* Main Viewport Content */}
       <main className="flex-1 overflow-hidden">
         {activeTab === 'decompiler' && (
           <DisassemblyWorkspace
@@ -141,14 +209,15 @@ export default function App() {
             onNavigateToPatcher={handleNavigateToPatcher}
             onNavigateToFrida={handleNavigateToFrida}
             onApplyPatch={handleApplyPatch}
+            patches={patches}
             providers={providers}
             roles={roles}
+            skills={skills}
+            globalPrompt={globalPrompt}
           />
         )}
 
-        {activeTab === 'frida' && (
-          <FridaBridge initialHookTarget={fridaHookTarget} />
-        )}
+        {activeTab === 'frida' && <FridaBridge initialHookTarget={fridaHookTarget} />}
 
         {activeTab === 'patcher' && (
           <SmartPatcher
@@ -170,6 +239,7 @@ export default function App() {
             skills={skills}
             selectedBinary={selectedBinary}
             selectedFunction={selectedFunction}
+            globalPrompt={globalPrompt}
           />
         )}
 
@@ -187,15 +257,12 @@ export default function App() {
             onToggleACPAgent={handleToggleACPAgent}
             globalPrompt={globalPrompt}
             onUpdateGlobalPrompt={setGlobalPrompt}
+            onResetDefaults={handleResetDefaults}
           />
         )}
       </main>
 
-      {/* macOS Plugin Bundle Export Modal */}
-      <PluginExportModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-      />
+      <PluginExportModal isOpen={isExportModalOpen} onClose={() => setIsExportModalOpen(false)} />
     </div>
   );
 }

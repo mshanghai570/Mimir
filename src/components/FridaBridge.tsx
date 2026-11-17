@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   FridaDevice,
   FridaProcess,
@@ -6,7 +6,6 @@ import {
 } from '../types';
 import {
   Smartphone,
-  Laptop,
   Play,
   Square,
   Search,
@@ -15,9 +14,7 @@ import {
   Trash2,
   Download,
   Copy,
-  Layers,
-  Zap,
-  Terminal,
+  Check,
   Activity,
 } from 'lucide-react';
 import { api } from '../services/api';
@@ -26,24 +23,8 @@ interface FridaBridgeProps {
   initialHookTarget?: string;
 }
 
-export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) => {
-  const [devices, setDevices] = useState<FridaDevice[]>([]);
-  const [selectedDevice, setSelectedDevice] = useState<FridaDevice | null>(null);
-  const [processes, setProcesses] = useState<FridaProcess[]>([]);
-  const [selectedProcess, setSelectedProcess] = useState<FridaProcess | null>(null);
-  const [processSearch, setProcessSearch] = useState('');
-  const [isLoadingProcesses, setIsLoadingProcesses] = useState(false);
-
-  // Script Studio State
-  const [scriptType, setScriptType] = useState<'swift_objc' | 'jailbreak_bypass' | 'ssl_pinning' | 'arm64_trace'>('swift_objc');
-  const [customScript, setCustomScript] = useState<string>('');
-  const [isSessionActive, setIsSessionActive] = useState(false);
-  const [logs, setLogs] = useState<FridaLogItem[]>([]);
-  const [logFilter, setLogFilter] = useState('');
-
-  // Pre-configured Frida script templates (with full iOS/macOS Swift & ObjC runtime support)
-  const scriptTemplates: Record<string, string> = {
-    swift_objc: `// [Frida Script] Swift & Objective-C Dynamic Method Interceptor
+const SCRIPT_TEMPLATES: Record<string, string> = {
+  swift_objc: `// [Frida Script] Swift & Objective-C Dynamic Method Interceptor
 // Compatible with iOS 16/17 (arm64e) and macOS (Apple Silicon)
 
 console.log("[*] Initializing Swift/ObjC Interceptor on target task...");
@@ -53,16 +34,15 @@ if (ObjC.available) {
         var targetClass = "LicenseManager";
         var targetMethod = "- verifyLicenseWith:";
 
-        var hook = ObjC.classes[targetClass][targetMethod];
+        var cls = ObjC.classes[targetClass];
+        var hook = cls ? cls[targetMethod] : null;
         if (hook) {
             Interceptor.attach(hook.implementation, {
                 onEnter: function (args) {
-                    var obj = new ObjC.Object(args[0]);
-                    var sel = ObjC.selectorAsString(args[1]);
-                    var keyArg = new ObjC.Object(args[2]);
+                    var keyArg = args[2] ? new ObjC.Object(args[2]).toString() : "null";
                     send({
                         level: "event",
-                        message: "Intercepted " + targetClass + " " + targetMethod + " | Arg: " + keyArg.toString()
+                        message: "Intercepted " + targetClass + " " + targetMethod + " | Arg: " + keyArg
                     });
                 },
                 onLeave: function (retval) {
@@ -81,10 +61,10 @@ if (ObjC.available) {
         console.error("[-] Hook error: " + err.message);
     }
 } else {
-    console.log("[!] Objective-C runtime not found in this process. Falling back to native C symbol hooking.");
+    console.log("[!] Objective-C runtime not found. Falling back to native symbol hooking.");
 }`,
 
-    jailbreak_bypass: `// [Frida Script] Universal Mobile Jailbreak & Root Bypass
+  jailbreak_bypass: `// [Frida Script] Universal Mobile Jailbreak & Root Bypass
 // Neutralizes file checks, ptrace anti-debugging, and env probing
 
 var jailbreakPaths = [
@@ -97,7 +77,6 @@ var jailbreakPaths = [
     "/usr/lib/libjailbreak.dylib"
 ];
 
-// Hook access()
 var accessPtr = Module.findExportByName(null, "access");
 if (accessPtr) {
     Interceptor.attach(accessPtr, {
@@ -113,19 +92,17 @@ if (accessPtr) {
         },
         onLeave: function (retval) {
             if (this.isJailbreakPath) {
-                retval.replace(ptr("-1")); // simulate ENOENT
+                retval.replace(ptr("-1"));
             }
         }
     });
 }
 
-// Hook ptrace(PT_DENY_ATTACH)
 var ptracePtr = Module.findExportByName(null, "ptrace");
 if (ptracePtr) {
     Interceptor.attach(ptracePtr, {
         onEnter: function (args) {
-            var request = args[0].toInt32();
-            if (request === 31) { // PT_DENY_ATTACH
+            if (args[0].toInt32() === 31) {
                 send({ level: "patch", message: "Bypassed ptrace(PT_DENY_ATTACH, 0, 0, 0)" });
                 this.denyAttach = true;
             }
@@ -139,46 +116,38 @@ if (ptracePtr) {
 }
 console.log("[+] Mobile integrity & anti-debugging bypasses active.");`,
 
-    ssl_pinning: `// [Frida Script] Universal SSL / TLS Pinning Bypass
+  ssl_pinning: `// [Frida Script] Universal SSL / TLS Pinning Bypass
 // Bypasses Apple Security Framework (SecTrustEvaluateWithError) & BoringSSL
 
 if (ObjC.available) {
     var secTrustEvaluate = Module.findExportByName("Security", "SecTrustEvaluateWithError");
     if (secTrustEvaluate) {
         Interceptor.attach(secTrustEvaluate, {
-            onEnter: function (args) {
+            onEnter: function () {
                 send({ level: "event", message: "SecTrustEvaluateWithError called! Forcing trust evaluation to TRUE" });
             },
             onLeave: function (retval) {
-                retval.replace(ptr("0x1")); // errSecSuccess / valid trust
+                retval.replace(ptr("0x1"));
             }
         });
     }
-
-    // Hook NSURLSessionDelegate
-    try {
-        var delegateClass = ObjC.classes.NSURLSession;
-        send({ level: "info", message: "Configured TLS certificate bypass on NSURLSession." });
-    } catch (e) {}
 }
 console.log("[+] SSL Pinning bypass successfully activated.");`,
 
-    arm64_trace: `// [Frida Script] Low-Level ARM64 Register & Memory Tracer
+  arm64_trace: `// [Frida Script] Low-Level ARM64 Register & Memory Tracer
 // Disassembles instructions dynamically at runtime
 
 var targetAddr = Module.findBaseAddress("libSecureCryptoCore.dylib");
 if (targetAddr) {
     var hookOffset = targetAddr.add(0x3fa0);
     Interceptor.attach(hookOffset, {
-        onEnter: function (args) {
-            var x0 = this.context.x0;
-            var x1 = this.context.x1;
+        onEnter: function () {
             send({
                 level: "event",
-                message: "Hit 0x3fa0 | x0=" + x0 + " x1=" + x1 + " sp=" + this.context.sp
+                message: "Hit 0x3fa0 | x0=" + this.context.x0 + " x1=" + this.context.x1 + " sp=" + this.context.sp
             });
         },
-        onLeave: function (retval) {
+        onLeave: function () {
             send({
                 level: "patch",
                 message: "Return from 0x3fa0 -> return x0=" + this.context.x0
@@ -188,9 +157,48 @@ if (targetAddr) {
 } else {
     console.log("[*] Target module not yet loaded. Waiting for dlopen()...");
 }`,
-  };
+};
 
-  // Load devices on mount
+function customizeTemplateForTarget(baseScript: string, hookTarget?: string): string {
+  if (!hookTarget) return baseScript;
+  // Support Objective-C signature like "-[ClassName method:]" or Swift "Module.ClassName.method(...)"
+  const objcMatch = hookTarget.match(/([+-])\[(\w+)\s+([^\]]+)\]/);
+  if (objcMatch) {
+    const [, sign, clsName, sel] = objcMatch;
+    return baseScript
+      .replace('LicenseManager', clsName)
+      .replace('- verifyLicenseWith:', `${sign} ${sel}`);
+  }
+  const parts = hookTarget.split('(')[0].split('.').filter(Boolean);
+  const clsName = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+  const methodName = parts.length >= 2 ? parts[parts.length - 1] : '';
+  let updated = baseScript.replace('LicenseManager', clsName || 'LicenseManager');
+  if (methodName) {
+    updated = updated.replace('- verifyLicenseWith:', `- ${methodName}:`);
+  }
+  return updated;
+}
+
+export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) => {
+  const [devices, setDevices] = useState<FridaDevice[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<FridaDevice | null>(null);
+  const [processes, setProcesses] = useState<FridaProcess[]>([]);
+  const [selectedProcess, setSelectedProcess] = useState<FridaProcess | null>(null);
+  const [processSearch, setProcessSearch] = useState('');
+  const [isLoadingProcesses, setIsLoadingProcesses] = useState(false);
+
+  // Spawn State
+  const [spawnBundleId, setSpawnBundleId] = useState('');
+  const [isSpawning, setIsSpawning] = useState(false);
+
+  // Script Studio State
+  const [scriptType, setScriptType] = useState<'swift_objc' | 'jailbreak_bypass' | 'ssl_pinning' | 'arm64_trace'>('swift_objc');
+  const [customScript, setCustomScript] = useState<string>('');
+  const [isSessionActive, setIsSessionActive] = useState(false);
+  const [logs, setLogs] = useState<FridaLogItem[]>([]);
+  const [logFilter, setLogFilter] = useState('');
+  const [copiedScript, setCopiedScript] = useState(false);
+
   useEffect(() => {
     async function initDevices() {
       const res = await api.getFridaDevices();
@@ -202,7 +210,6 @@ if (targetAddr) {
     initDevices();
   }, []);
 
-  // Fetch processes when selectedDevice changes
   useEffect(() => {
     if (!selectedDevice) return;
     const devId = selectedDevice.id;
@@ -218,48 +225,48 @@ if (targetAddr) {
     loadProcs(devId);
   }, [selectedDevice]);
 
-  // Sync script template
   useEffect(() => {
-    let script = scriptTemplates[scriptType] || scriptTemplates.swift_objc;
-    if (initialHookTarget && scriptType === 'swift_objc') {
-      script = script.replace('LicenseManager', initialHookTarget.split('.')[0] || 'LicenseManager');
+    let script = SCRIPT_TEMPLATES[scriptType] || SCRIPT_TEMPLATES.swift_objc;
+    if (scriptType === 'swift_objc' && initialHookTarget) {
+      script = customizeTemplateForTarget(script, initialHookTarget);
     }
     setCustomScript(script);
   }, [scriptType, initialHookTarget]);
 
-  // Start Frida Instrumentation Session
   const handleStartSession = async () => {
-    const currentDevice = selectedDevice;
-    const currentProc = selectedProcess;
-    if (!currentDevice || !currentProc) return;
+    if (!selectedDevice || !selectedProcess) return;
     setIsSessionActive(true);
 
     const initialLog: FridaLogItem = {
       id: `log_${Date.now()}`,
       timestamp: new Date().toLocaleTimeString(),
       level: 'info',
-      message: `Establishing Frida session to PID ${currentProc.pid} (${currentProc.name}) on ${currentDevice.name} via ${currentDevice.transport}...`,
+      message: `Establishing Frida session to PID ${selectedProcess.pid} (${selectedProcess.name}) on ${selectedDevice.name} via ${selectedDevice.transport}...`,
     };
     setLogs((prev) => [initialLog, ...prev]);
 
     try {
       const res = await api.executeFridaScript({
-        deviceId: currentDevice.id,
-        pid: currentProc.pid,
+        deviceId: selectedDevice.id,
+        pid: selectedProcess.pid,
         script: customScript,
         scriptType,
       });
 
-      if (res.success && res.logs) {
+      if (res.logs && res.logs.length > 0) {
         const mappedLogs = res.logs.map((l, i) => ({
           id: `log_${Date.now()}_${i}`,
           timestamp: new Date(l.timestamp).toLocaleTimeString(),
-          level: l.level as any,
+          level: l.level as FridaLogItem['level'],
           message: l.message,
         }));
         setLogs((prev) => [...mappedLogs, ...prev]);
       }
+      if (!res.success) {
+        setIsSessionActive(false);
+      }
     } catch (err: any) {
+      setIsSessionActive(false);
       setLogs((prev) => [
         {
           id: `log_${Date.now()}`,
@@ -285,16 +292,58 @@ if (targetAddr) {
     ]);
   };
 
-  const filteredProcesses = processes.filter(
-    (p) =>
-      p.name.toLowerCase().includes(processSearch.toLowerCase()) ||
-      p.bundleId.toLowerCase().includes(processSearch.toLowerCase()) ||
-      String(p.pid).includes(processSearch)
-  );
+  const handleSpawnApp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!selectedDevice || !spawnBundleId.trim() || isSpawning) return;
+    setIsSpawning(true);
 
-  const filteredLogs = logs.filter((l) =>
-    l.message.toLowerCase().includes(logFilter.toLowerCase())
-  );
+    try {
+      const res = await api.spawnFridaApp(selectedDevice.id, spawnBundleId.trim());
+      if (res.success && res.process) {
+        setProcesses((prev) => [res.process!, ...prev.filter((p) => p.pid !== res.process!.pid)]);
+        setSelectedProcess(res.process);
+        setSpawnBundleId('');
+      }
+      if (res.logs) {
+        const mapped = res.logs.map((l, idx) => ({
+          id: `spawn_${Date.now()}_${idx}`,
+          timestamp: new Date(l.timestamp).toLocaleTimeString(),
+          level: l.level as FridaLogItem['level'],
+          message: l.message,
+        }));
+        setLogs((prev) => [...mapped, ...prev]);
+      }
+    } finally {
+      setIsSpawning(false);
+    }
+  };
+
+  const handleDownloadScript = () => {
+    const blob = new Blob([customScript], { type: 'text/javascript;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `mimir_${scriptType}.js`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const filteredProcesses = useMemo(() => {
+    const q = processSearch.toLowerCase();
+    return processes.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.bundleId.toLowerCase().includes(q) ||
+        String(p.pid).includes(q)
+    );
+  }, [processes, processSearch]);
+
+  const filteredLogs = useMemo(() => {
+    const q = logFilter.toLowerCase();
+    return logs.filter((l) => l.message.toLowerCase().includes(q));
+  }, [logs, logFilter]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-53px)] bg-[#090d14] text-slate-200">
@@ -336,7 +385,6 @@ if (targetAddr) {
           )}
         </div>
 
-        {/* Action button */}
         <div className="flex items-center gap-2">
           {isSessionActive ? (
             <button
@@ -414,38 +462,30 @@ if (targetAddr) {
             )}
           </div>
 
-          {/* Quick Spawn Box */}
-          <div className="p-3 border-t border-slate-800 bg-[#090d14] text-xs">
+          {/* Controlled Quick Spawn Box */}
+          <form onSubmit={handleSpawnApp} className="p-3 border-t border-slate-800 bg-[#090d14] text-xs">
             <span className="text-slate-400 text-[11px] block mb-1.5">Spawn Fresh Application</span>
             <div className="flex items-center gap-1.5">
               <input
                 type="text"
+                value={spawnBundleId}
+                onChange={(e) => setSpawnBundleId(e.target.value)}
                 placeholder="com.target.bundleId"
-                className="flex-1 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs text-slate-200 font-mono"
+                className="flex-1 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500"
               />
               <button
-                onClick={() => {
-                  setLogs((prev) => [
-                    {
-                      id: `log_${Date.now()}`,
-                      timestamp: new Date().toLocaleTimeString(),
-                      level: 'info',
-                      message: `[Frida] Spawned com.target.app with suspended main thread. Applying hooks prior to entry...`,
-                    },
-                    ...prev,
-                  ]);
-                }}
-                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-medium text-xs whitespace-nowrap"
+                type="submit"
+                disabled={isSpawning || !spawnBundleId.trim()}
+                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-medium text-xs whitespace-nowrap disabled:opacity-50"
               >
-                Spawn
+                {isSpawning ? 'Spawning...' : 'Spawn'}
               </button>
             </div>
-          </div>
+          </form>
         </div>
 
         {/* Column 2: Script Studio & Hook Presets */}
         <div className="flex-1 flex flex-col bg-[#070a10] border-r border-slate-800/80 overflow-hidden">
-          {/* Script Preset Toolbar */}
           <div className="p-3 bg-[#0d121c] border-b border-slate-800 flex items-center justify-between flex-wrap gap-2 text-xs">
             <div className="flex items-center gap-1.5">
               <span className="text-slate-400 font-medium">Hook Preset:</span>
@@ -485,18 +525,28 @@ if (targetAddr) {
               </div>
             </div>
 
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(customScript);
-              }}
-              className="flex items-center gap-1 px-2.5 py-1 text-slate-400 hover:text-white bg-slate-800/70 rounded border border-slate-700 text-xs"
-            >
-              <Copy className="w-3 h-3" />
-              <span>Copy</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleDownloadScript}
+                className="flex items-center gap-1 px-2.5 py-1 text-slate-300 hover:text-white bg-slate-800/70 rounded border border-slate-700 text-xs"
+              >
+                <Download className="w-3 h-3" />
+                <span>.js</span>
+              </button>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(customScript);
+                  setCopiedScript(true);
+                  setTimeout(() => setCopiedScript(false), 1800);
+                }}
+                className="flex items-center gap-1 px-2.5 py-1 text-slate-400 hover:text-white bg-slate-800/70 rounded border border-slate-700 text-xs"
+              >
+                {copiedScript ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedScript ? 'Copied' : 'Copy'}</span>
+              </button>
+            </div>
           </div>
 
-          {/* Script Editor */}
           <div className="flex-1 p-3 flex flex-col overflow-hidden bg-[#070a10]">
             <textarea
               value={customScript}
@@ -509,28 +559,22 @@ if (targetAddr) {
 
         {/* Column 3: Live Real-Time Telemetry & Event Stream */}
         <div className="w-96 bg-[#090c13] flex flex-col shrink-0 overflow-hidden">
-          {/* Telemetry Header */}
           <div className="p-3 bg-[#0d121c] border-b border-slate-800 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
               <Activity className="w-4 h-4 text-cyan-400" />
               <span className="font-semibold text-white">Live Telemetry Stream</span>
-              {isSessionActive && (
-                <span className="text-[10px] text-emerald-400 font-mono">Active</span>
-              )}
+              {isSessionActive && <span className="text-[10px] text-emerald-400 font-mono">Active</span>}
             </div>
 
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => setLogs([])}
-                className="p-1 text-slate-400 hover:text-rose-300 transition-colors"
-                title="Clear console"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            <button
+              onClick={() => setLogs([])}
+              className="p-1 text-slate-400 hover:text-rose-300 transition-colors"
+              title="Clear console"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          {/* Log Search / Filter */}
           <div className="p-2 border-b border-slate-800 bg-[#070a10]">
             <div className="relative">
               <Filter className="w-3 h-3 text-slate-500 absolute left-2.5 top-2.5" />
@@ -544,7 +588,6 @@ if (targetAddr) {
             </div>
           </div>
 
-          {/* Telemetry Log Feed */}
           <div className="flex-1 overflow-y-auto p-3 space-y-2 font-mono text-xs divide-y divide-slate-800/30">
             {filteredLogs.length === 0 ? (
               <div className="p-6 text-center text-slate-600 text-xs">
@@ -576,7 +619,6 @@ if (targetAddr) {
             )}
           </div>
 
-          {/* Workbench photo preview card */}
           <div className="p-3 border-t border-slate-800 bg-[#080b12]">
             <div className="relative rounded-lg overflow-hidden border border-slate-800 group">
               <img
