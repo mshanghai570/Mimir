@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from pathlib import Path
 
 
 class PluginLogicTests(unittest.TestCase):
@@ -75,6 +76,17 @@ class PluginLogicTests(unittest.TestCase):
         self.assertEqual(len(bv.writes), 1)
         self.assertEqual(len(bv.writes[0][1]), 8)
 
+    def test_write_failure_is_reported_as_patch_failure(self):
+        bv = FailingBinaryView({0x1000: 4})
+        ok, message = self.plugin.MimirAgent(bv).synthesize_arm64_patch(0x1000, "nop_sled")
+        self.assertFalse(ok)
+        self.assertIn("Patch failed", message)
+
+    def test_exporter_reads_canonical_plugin_source(self):
+        server = Path("server.ts").read_text()
+        self.assertIn("readFileSync(path.join(pluginDir, 'mimir_binja.py')", server)
+        self.assertNotIn("const pythonPluginCode = `", server)
+
 
 class Architecture:
     name = "aarch64"
@@ -112,6 +124,11 @@ class FakeBinaryView:
 
     def set_comment_at(self, address, text):
         pass
+
+
+class FailingBinaryView(FakeBinaryView):
+    def write(self, address, data):
+        raise OSError("write denied")
 
 
 if __name__ == "__main__":

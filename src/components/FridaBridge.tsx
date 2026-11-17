@@ -241,7 +241,7 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
       id: `log_${Date.now()}`,
       timestamp: new Date().toLocaleTimeString(),
       level: 'info',
-      message: `Establishing Frida session to PID ${selectedProcess.pid} (${selectedProcess.name}) on ${selectedDevice.name} via ${selectedDevice.transport}...`,
+      message: `[SIMULATED] Frida session preview for PID ${selectedProcess.pid} (${selectedProcess.name}) on ${selectedDevice.name} via ${selectedDevice.transport}...`,
     };
     setLogs((prev) => [initialLog, ...prev]);
 
@@ -286,7 +286,7 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
         id: `log_${Date.now()}`,
         timestamp: new Date().toLocaleTimeString(),
         level: 'warn',
-        message: `Frida session detached from PID ${selectedProcess?.pid || 0}. Interceptor hooks removed.`,
+        message: `[SIMULATED] Frida session preview stopped for PID ${selectedProcess?.pid || 0}. No hooks were installed.`,
       },
       ...prev,
     ]);
@@ -353,6 +353,9 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
           <div className="flex items-center gap-2">
             <Smartphone className="w-4 h-4 text-cyan-400" />
             <span className="text-xs font-semibold text-white">Target Device:</span>
+            <span className="rounded border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[10px] font-bold tracking-wider text-amber-300">
+              SIMULATION MODE
+            </span>
             <select
               value={selectedDevice?.id || ''}
               onChange={(e) => {
@@ -373,7 +376,7 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
             <div className="flex items-center gap-3 text-xs text-slate-400 font-mono">
               <span className="text-emerald-400 flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Connected via {selectedDevice.transport}</span>
+                <span>Simulated via {selectedDevice.transport}</span>
               </span>
               <span aria-hidden="true" className="text-slate-600">·</span>
               <span>Arch: {selectedDevice.arch}</span>
@@ -392,7 +395,7 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
               className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-rose-300 bg-rose-950/60 border border-rose-800/80 rounded hover:bg-rose-900/80 transition-colors"
             >
               <Square className="w-3.5 h-3.5 fill-rose-300" />
-              <span>Detach Frida</span>
+              <span>Stop Preview</span>
             </button>
           ) : (
             <button
@@ -401,7 +404,7 @@ export const FridaBridge: React.FC<FridaBridgeProps> = ({ initialHookTarget }) =
               className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 rounded transition-colors disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5 fill-slate-950" />
-              <span>Attach & Inject Script</span>
+              <span>Preview Script Run</span>
             </button>
           )}
         </div>

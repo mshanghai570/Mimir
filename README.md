@@ -36,6 +36,8 @@ npm run dev
 
 Set `GEMINI_API_KEY` in `.env.local` or the server environment when using Gemini. The backend listens on port 3000 by default. If it runs elsewhere, update the Binary Ninja setting `mimir.serverEndpoint`.
 
+The backend binds to `127.0.0.1` by default. For deliberate LAN access, set `HOST`, `MIMIR_ACCESS_TOKEN`, and `MIMIR_ALLOW_PRIVATE_OUTBOUND=true` only when needed. The Binary Ninja plugin reads `MIMIR_ACCESS_TOKEN` from its process environment when calling a token-protected backend.
+
 After opening the Mimir sidebar in Binary Ninja, use **AI Provider Settings** to select Gemini or an OpenAI-compatible provider, enter the provider URL, model, API key, and companion backend endpoint. These values are stored in Binary Ninja settings and are used by subsequent AI requests.
 
 ## Run the web UI
@@ -46,7 +48,9 @@ The browser UI is useful as a companion dashboard, but it is not the Binary Ninj
 npm run dev
 ```
 
-The web UI includes sample/mock binary data for its disassembly screens. The generated Binary Ninja plugin, not those screens, operates on the live Binary Ninja `BinaryView`. The Frida controls in the current web UI are also simulated and should not be treated as a live device bridge.
+The web UI includes sample/mock binary data for its disassembly screens. The generated Binary Ninja plugin, not those screens, operates on the live Binary Ninja `BinaryView`. The Frida panel is visibly marked **SIMULATION MODE**; its devices, processes, sessions, and hook logs are simulated and should not be treated as a live device bridge.
+
+The plugin exporter reads the canonical files from `plugin/mimir_plugin/`, so exported Python stays synchronized with the directly installable plugin.
 
 ## Verification
 
