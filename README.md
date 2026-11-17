@@ -23,6 +23,8 @@ Copy the complete `plugin/mimir_plugin` directory into Binary Ninja’s plugin d
 
 The directory must contain `plugin.json`, `__init__.py`, and `mimir_binja.py`. Restart Binary Ninja after copying the files. The plugin metadata declares Binary Ninja 3.5+ as the minimum version.
 
+The `3.5+` value is an installation floor, not a compatibility guarantee. Binary Ninja `6.0.10601` has not been run in this sandbox and remains unverified. Use the [Binary Ninja compatibility checklist](docs/binaryninja-compatibility.md) on the target installation before treating that version as supported.
+
 ## Run the optional AI backend
 
 The plugin’s local patching and Binary Ninja UI commands do not require the web app. AI analysis does require the companion backend:
