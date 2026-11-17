@@ -6,6 +6,7 @@ import { SmartPatcher } from './components/SmartPatcher';
 import { MultiAgentBoard } from './components/MultiAgentBoard';
 import { SettingsStudio } from './components/SettingsStudio';
 import { PluginExportModal } from './components/PluginExportModal';
+import { api } from './services/api';
 
 import { sampleBinaries } from './data/mockBinaries';
 import {
@@ -76,8 +77,26 @@ export default function App() {
   );
 
   useEffect(() => {
+    let mounted = true;
+    api.listProviders().then((result) => {
+      if (!mounted) return;
+      if (result.success && result.providers.length > 0) {
+        setProviders(result.providers);
+      } else if (result.success) {
+        providers.forEach((provider) => void api.saveProvider(provider));
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     try {
-      localStorage.setItem('mimir_providers_v1', JSON.stringify(providers));
+      localStorage.setItem(
+        'mimir_providers_v1',
+        JSON.stringify(providers.map(({ apiKey, ...provider }) => ({ ...provider, apiKey: '' })))
+      );
     } catch {}
   }, [providers]);
 
@@ -129,14 +148,17 @@ export default function App() {
   // Provider CRUD Handlers
   const handleAddProvider = (newProv: AIProvider) => {
     setProviders((prev) => [...prev, newProv]);
+    void api.saveProvider(newProv);
   };
 
   const handleUpdateProvider = (updated: AIProvider) => {
     setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    void api.saveProvider(updated);
   };
 
   const handleDeleteProvider = (id: string) => {
     setProviders((prev) => prev.filter((p) => p.id !== id));
+    void api.deleteProvider(id);
   };
 
   // Role CRUD Handler

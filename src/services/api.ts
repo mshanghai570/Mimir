@@ -1,15 +1,15 @@
-import { ModelInfo, FridaDevice, FridaProcess, FridaLogItem } from '../types';
+import { AIProvider, ModelInfo, FridaDevice, FridaProcess, FridaLogItem } from '../types';
 
 export const api = {
   /**
    * Fetches available models from an OpenAI-compatible URL or Gemini
    */
-  async fetchModels(url: string, apiKey: string, providerType?: string): Promise<{ success: boolean; models: ModelInfo[]; error?: string; note?: string }> {
+  async fetchModels(url: string, apiKey: string, providerType?: string, providerId?: string): Promise<{ success: boolean; models: ModelInfo[]; error?: string; note?: string }> {
     try {
       const res = await fetch('/api/ai/models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, apiKey, providerType }),
+        body: JSON.stringify({ url, apiKey, providerType, providerId }),
       });
       return await res.json();
     } catch (err: any) {
@@ -21,6 +21,7 @@ export const api = {
    * Universal chat inference
    */
   async sendChat(params: {
+    providerId?: string;
     providerType: string;
     providerUrl: string;
     apiKey: string;
@@ -47,6 +48,7 @@ export const api = {
   async dispatchRole(params: {
     role: string;
     agentConfig: {
+      providerId?: string;
       providerType?: string;
       providerUrl?: string;
       apiKey?: string;
@@ -80,6 +82,37 @@ export const api = {
         output: '',
         error: err.message || 'Dispatch failed',
       };
+    }
+  },
+
+  async listProviders(): Promise<{ success: boolean; providers: AIProvider[]; error?: string }> {
+    try {
+      const res = await fetch('/api/providers');
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, providers: [], error: err.message || 'Provider store unavailable' };
+    }
+  },
+
+  async saveProvider(provider: AIProvider): Promise<{ success: boolean; provider?: AIProvider; error?: string }> {
+    try {
+      const res = await fetch(`/api/providers/${encodeURIComponent(provider.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(provider),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Provider save failed' };
+    }
+  },
+
+  async deleteProvider(id: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const res = await fetch(`/api/providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Provider delete failed' };
     }
   },
 

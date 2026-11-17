@@ -86,6 +86,7 @@ export const MultiAgentBoard: React.FC<MultiAgentBoardProps> = ({
       const res = await api.dispatchRole({
         role: roleConfig.id,
         agentConfig: {
+          providerId: assignedProvider?.id,
           providerType: assignedProvider?.type,
           providerUrl: assignedProvider?.url,
           apiKey: assignedProvider?.apiKey,

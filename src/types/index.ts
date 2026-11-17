@@ -21,6 +21,7 @@ export interface AIProvider {
   type: ProviderType;
   url: string;
   apiKey: string;
+  hasApiKey?: boolean;
   availableModels: ModelInfo[];
   selectedModel: string;
   systemPrompt: string;

@@ -4,6 +4,7 @@ import path from 'path';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
+import { ProviderStore } from './server/providerStore';
 
 dotenv.config();
 
@@ -15,6 +16,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
 const ACCESS_TOKEN = process.env.MIMIR_ACCESS_TOKEN?.trim() || '';
 const ALLOW_PRIVATE_OUTBOUND = process.env.MIMIR_ALLOW_PRIVATE_OUTBOUND === 'true';
+const providerStore = new ProviderStore();
 
 app.use(express.json({ limit: '15mb' }));
 if (!['127.0.0.1', '::1', 'localhost'].includes(HOST) && !ACCESS_TOKEN) {
@@ -129,6 +131,46 @@ function parseProviderError(err: any): { status: number; message: string } {
   return { status: status >= 400 && status < 600 ? status : 500, message: rawMessage };
 }
 
+app.get('/api/providers', (_req, res) => {
+  try {
+    return res.json({ success: true, providers: providerStore.publicList() });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, providers: [], error: error.message || 'Provider store unavailable' });
+  }
+});
+
+app.put('/api/providers/:id', (req, res) => {
+  try {
+    const body = req.body || {};
+    const id = String(req.params.id);
+    if (body.id && body.id !== id) return res.status(400).json({ success: false, error: 'Provider ID mismatch.' });
+    if (!body.name || !body.type) return res.status(400).json({ success: false, error: 'Provider name and type are required.' });
+    const provider = providerStore.upsert({
+      id,
+      name: String(body.name).trim(),
+      type: String(body.type),
+      url: String(body.url || '').trim(),
+      apiKey: typeof body.apiKey === 'string' ? body.apiKey : '',
+      availableModels: Array.isArray(body.availableModels) ? body.availableModels : [],
+      selectedModel: String(body.selectedModel || ''),
+      systemPrompt: String(body.systemPrompt || ''),
+      isActive: body.isActive !== false,
+      lastFetchedAt: body.lastFetchedAt ? String(body.lastFetchedAt) : undefined,
+    });
+    return res.json({ success: true, provider });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error.message || 'Provider save failed' });
+  }
+});
+
+app.delete('/api/providers/:id', (req, res) => {
+  try {
+    return res.json({ success: true, removed: providerStore.remove(String(req.params.id)) });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error.message || 'Provider delete failed' });
+  }
+});
+
 // Health check endpoint
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -143,9 +185,13 @@ app.get('/api/health', (_req, res) => {
 // ==========================================
 app.post('/api/ai/models', async (req, res) => {
   try {
-    const { url, apiKey, providerType } = req.body;
+    const { url, apiKey, providerType, providerId } = req.body;
+    const storedProvider = providerId ? providerStore.get(String(providerId)) : undefined;
+    const effectiveUrl = storedProvider?.url || url;
+    const effectiveApiKey = storedProvider?.apiKey || apiKey;
+    const effectiveProviderType = storedProvider?.type || providerType;
 
-    if (providerType === 'gemini' || (!url && !providerType)) {
+    if (effectiveProviderType === 'gemini' || (!effectiveUrl && !effectiveProviderType)) {
       const geminiModels = [
         { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen (Agentic & Fast)', provider: 'Google Gemini', contextWindow: 1048576 },
         { id: 'gemini-4-argon', name: 'Gemini 4 Argon (Advanced Code & RE Reasoning)', provider: 'Google Gemini', contextWindow: 2097152 },
@@ -155,18 +201,18 @@ app.post('/api/ai/models', async (req, res) => {
       return res.json({ success: true, models: geminiModels });
     }
 
-    if (!url) {
+    if (!effectiveUrl) {
       return res.status(400).json({ success: false, error: 'Provider URL is required' });
     }
 
-    const targetBase = validateOutboundUrl(url.trim());
+    const targetBase = validateOutboundUrl(effectiveUrl.trim());
     const modelsEndpoint = normalizeOpenAIEndpoint(targetBase, 'models');
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+    if (effectiveApiKey) {
+      headers['Authorization'] = `Bearer ${effectiveApiKey.trim()}`;
     }
 
     let fetchResponse: Response | null = null;
@@ -229,10 +275,14 @@ app.post('/api/ai/models', async (req, res) => {
 // ==========================================
 app.post('/api/ai/chat', async (req, res) => {
   try {
-    const { providerType, providerUrl, apiKey, model, messages, systemPrompt, temperature } = req.body;
+    const { providerId, providerType, providerUrl, apiKey, model, messages, systemPrompt, temperature } = req.body;
+    const storedProvider = providerId ? providerStore.get(String(providerId)) : undefined;
+    const effectiveProviderType = storedProvider?.type || providerType;
+    const effectiveProviderUrl = storedProvider?.url || providerUrl;
+    const effectiveApiKey = storedProvider?.apiKey || apiKey;
 
     // Route 1: Google Gemini via @google/genai server-side SDK
-    if (providerType === 'gemini' || model?.startsWith('gemini') || (!providerUrl && process.env.GEMINI_API_KEY)) {
+    if (effectiveProviderType === 'gemini' || model?.startsWith('gemini') || (!effectiveProviderUrl && process.env.GEMINI_API_KEY)) {
       if (!ai) ai = getGeminiClient();
       if (!ai) {
         return res.status(400).json({
@@ -272,11 +322,11 @@ app.post('/api/ai/chat', async (req, res) => {
     }
 
     // Route 2: OpenAI-Compatible Endpoint
-    if (!providerUrl) {
+    if (!effectiveProviderUrl) {
       return res.status(400).json({ success: false, error: 'Provider URL is missing for non-Gemini provider.' });
     }
 
-    const chatEndpoint = normalizeOpenAIEndpoint(validateOutboundUrl(providerUrl), 'chat/completions');
+    const chatEndpoint = normalizeOpenAIEndpoint(validateOutboundUrl(effectiveProviderUrl), 'chat/completions');
     const outboundMessages = [];
     if (systemPrompt) {
       outboundMessages.push({ role: 'system', content: systemPrompt });
@@ -293,8 +343,8 @@ app.post('/api/ai/chat', async (req, res) => {
     };
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+    if (effectiveApiKey) {
+      headers['Authorization'] = `Bearer ${effectiveApiKey.trim()}`;
     }
 
     const aiRes = await callWithRetry(() =>
@@ -338,6 +388,10 @@ app.post('/api/ai/chat', async (req, res) => {
 app.post('/api/ai/dispatch-role', async (req, res) => {
   try {
     const { role, agentConfig, objective, context } = req.body;
+    const storedProvider = agentConfig?.providerId ? providerStore.get(String(agentConfig.providerId)) : undefined;
+    const effectiveAgentConfig = storedProvider
+      ? { ...agentConfig, providerType: storedProvider.type, providerUrl: storedProvider.url, apiKey: storedProvider.apiKey }
+      : agentConfig;
     const safeRole = typeof role === 'string' ? role : 'decompiler';
     const safeContext = context || {};
 
@@ -388,14 +442,14 @@ app.post('/api/ai/dispatch-role', async (req, res) => {
 
     // Merge global prompt, role-specific prompt directive, and enabled agent skills
     const systemParts = [roleSystem];
-    if (agentConfig?.globalPrompt) {
-      systemParts.push(`[GLOBAL ORCHESTRATOR DIRECTIVES]\n${agentConfig.globalPrompt}`);
+    if (effectiveAgentConfig?.globalPrompt) {
+      systemParts.push(`[GLOBAL ORCHESTRATOR DIRECTIVES]\n${effectiveAgentConfig.globalPrompt}`);
     }
-    if (agentConfig?.customPrompt) {
-      systemParts.push(`[ROLE SPECIFIC DIRECTIVE]\n${agentConfig.customPrompt}`);
+    if (effectiveAgentConfig?.customPrompt) {
+      systemParts.push(`[ROLE SPECIFIC DIRECTIVE]\n${effectiveAgentConfig.customPrompt}`);
     }
-    if (Array.isArray(agentConfig?.skills) && agentConfig.skills.length > 0) {
-      systemParts.push(`[ACTIVE SKILLS & TOOLS]\n${agentConfig.skills.map((s: string) => `- ${s}`).join('\n')}`);
+    if (Array.isArray(effectiveAgentConfig?.skills) && effectiveAgentConfig.skills.length > 0) {
+      systemParts.push(`[ACTIVE SKILLS & TOOLS]\n${effectiveAgentConfig.skills.map((s: string) => `- ${s}`).join('\n')}`);
     }
     const composedSystemInstruction = systemParts.join('\n\n');
 
@@ -420,9 +474,9 @@ ${safeContext.assembly || '// No assembly provided'}
 Provide a concise, rigorous technical analysis and actionable output for your assigned role.`;
 
     const isGeminiRoute =
-      agentConfig?.providerType === 'gemini' ||
-      agentConfig?.model?.startsWith('gemini') ||
-      !agentConfig?.providerUrl;
+      effectiveAgentConfig?.providerType === 'gemini' ||
+      effectiveAgentConfig?.model?.startsWith('gemini') ||
+      !effectiveAgentConfig?.providerUrl;
 
     if (isGeminiRoute) {
       if (!ai) ai = getGeminiClient();
@@ -436,7 +490,7 @@ Provide a concise, rigorous technical analysis and actionable output for your as
         });
       }
 
-      const selectedModel = agentConfig?.model || 'gemini-4-hydrogen';
+      const selectedModel = effectiveAgentConfig?.model || 'gemini-4-hydrogen';
       const response = await callWithRetry(() =>
         ai!.models.generateContent({
           model: selectedModel,
@@ -454,10 +508,10 @@ Provide a concise, rigorous technical analysis and actionable output for your as
     }
 
     // Route to configured OpenAI-compatible provider
-    const chatEndpoint = normalizeOpenAIEndpoint(validateOutboundUrl(agentConfig.providerUrl), 'chat/completions');
+    const chatEndpoint = normalizeOpenAIEndpoint(validateOutboundUrl(effectiveAgentConfig.providerUrl), 'chat/completions');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (agentConfig.apiKey) {
-      headers['Authorization'] = `Bearer ${agentConfig.apiKey.trim()}`;
+    if (effectiveAgentConfig.apiKey) {
+      headers['Authorization'] = `Bearer ${effectiveAgentConfig.apiKey.trim()}`;
     }
 
     const aiRes = await callWithRetry(() =>
@@ -465,12 +519,12 @@ Provide a concise, rigorous technical analysis and actionable output for your as
         method: 'POST',
         headers,
         body: JSON.stringify({
-          model: agentConfig.model || 'gpt-4o',
+          model: effectiveAgentConfig.model || 'gpt-4o',
           messages: [
             { role: 'system', content: composedSystemInstruction },
             { role: 'user', content: prompt },
           ],
-          temperature: typeof agentConfig.temperature === 'number' ? agentConfig.temperature : 0.2,
+          temperature: typeof effectiveAgentConfig.temperature === 'number' ? effectiveAgentConfig.temperature : 0.2,
           max_tokens: 3000,
         }),
         signal: AbortSignal.timeout(60000),

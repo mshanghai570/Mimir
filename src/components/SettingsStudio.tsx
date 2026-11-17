@@ -104,7 +104,7 @@ export const SettingsStudio: React.FC<SettingsStudioProps> = ({
   const handleRefreshExistingProvider = async (prov: AIProvider) => {
     setRefreshingProvId(prov.id);
     try {
-      const res = await api.fetchModels(prov.url, prov.apiKey, prov.type);
+      const res = await api.fetchModels(prov.url, prov.apiKey, prov.type, prov.id);
       if (res.success && res.models.length > 0) {
         onUpdateProvider({
           ...prov,
@@ -454,6 +454,10 @@ export const SettingsStudio: React.FC<SettingsStudioProps> = ({
                         ) : (
                           <span className="text-slate-500">Injected AI Studio Server Key</span>
                         )}
+                      </div>
+
+                      <div className="text-[11px] text-emerald-400/90">
+                        {prov.hasApiKey || prov.apiKey ? 'API key stored securely on companion server' : 'No API key stored'}
                       </div>
 
                       <div className="text-slate-400 text-xs flex items-center gap-2 mt-1">

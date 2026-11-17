@@ -258,6 +258,7 @@ export async function executeNaturalLanguageIntent(
 
   if (!query.startsWith('/')) {
     const chatRes = await api.sendChat({
+      providerId: assignedProvider.id,
       providerType: assignedProvider.type,
       providerUrl: assignedProvider.url,
       apiKey: assignedProvider.apiKey,
@@ -292,6 +293,7 @@ export async function executeNaturalLanguageIntent(
   const res = await api.dispatchRole({
     role: targetRole,
     agentConfig: {
+      providerId: assignedProvider.id,
       providerType: assignedProvider?.type,
       providerUrl: assignedProvider?.url,
       apiKey: assignedProvider?.apiKey,
