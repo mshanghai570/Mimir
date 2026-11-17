@@ -1,0 +1,23 @@
+{
+  "pluginmetadataversion": 2,
+  "name": "Mimir AI Orchestrator",
+  "author": "Mimir Security",
+  "license": {
+    "name": "MIT",
+    "text": "MIT License"
+  },
+  "platforms": [
+    "Darwin",
+    "Linux",
+    "Windows"
+  ],
+  "installinstructions": {
+    "Darwin": "Copy the mimir_plugin folder into ~/Library/Application Support/Binary Ninja/plugins/",
+    "Linux": "Copy the mimir_plugin folder into ~/.binaryninja/plugins/",
+    "Windows": "Copy the mimir_plugin folder into %APPDATA%\\Binary Ninja\\plugins\\"
+  },
+  "dependencies": {},
+  "version": "2.5.0",
+  "minimumbinaryninjaversion": 3500,
+  "description": "Autonomous Binary Ninja AI reverse engineering plugin with HLIL semantic search, ARM64 smart patching, multi-agent role dispatch, and Frida hook generation."
+}
